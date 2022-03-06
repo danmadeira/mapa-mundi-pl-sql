@@ -14,8 +14,8 @@ whenever sqlerror exit sql.sqlcode rollback
 begin
 wwv_flow_api.import_begin (
  p_version_yyyy_mm_dd=>'2021.10.15'
-,p_release=>'21.2.0'
-,p_default_workspace_id=>38718764601989331347
+,p_release=>'21.2.4'
+,p_default_workspace_id=>38134676337898140197
 ,p_default_application_id=>48032
 ,p_default_id_offset=>0
 ,p_default_owner=>'WKSP_DMETI'
@@ -23,20 +23,20 @@ wwv_flow_api.import_begin (
 end;
 /
  
-prompt APPLICATION 48032 - Mundo
+prompt APPLICATION 48032 - Oracle APEX Development
 --
 -- Application Export:
 --   Application:     48032
---   Name:            Mundo
---   Date and Time:   20:34 Tuesday January 18, 2022
+--   Name:            Oracle APEX Development
+--   Date and Time:   13:36 Domingo Março 6, 2022
 --   Exported By:     DANIEL@APEX.COM
 --   Flashback:       0
 --   Export Type:     Page Export
 --   Manifest
 --     PAGE: 44
 --   Manifest End
---   Version:         21.2.0
---   Instance ID:     65651331942437
+--   Version:         21.2.4
+--   Instance ID:     63113759365424
 --
 
 begin
@@ -61,7 +61,7 @@ wwv_flow_api.create_page(
 ,p_required_role=>wwv_flow_api.id(38137761775886382934)
 ,p_protection_level=>'C'
 ,p_last_updated_by=>'DANIEL@APEX.COM'
-,p_last_upd_yyyymmddhh24miss=>'20220118194131'
+,p_last_upd_yyyymmddhh24miss=>'20220306133031'
 );
 wwv_flow_api.create_page_plug(
  p_id=>wwv_flow_api.id(30363532857664073801)
@@ -95,51 +95,71 @@ wwv_flow_api.create_page_plug(
 '  l_abertura := world_map_projections.exibir_abertura_svg ( p_largura  => l_largura',
 '                                                          , p_altura   => l_altura',
 '                                                          , p_projecao => l_projecao',
-'                                                          , p_moldura => l_moldura);',
+'                                                          , p_moldura => l_moldura',
+'                                                          );',
 '                                                          ',
 '  l_fundo := world_map_projections.exibir_fundo_azul ( p_largura  => l_largura',
 '                                                     , p_altura   => l_altura',
-'                                                     , p_projecao => l_projecao);',
+'                                                     , p_projecao => l_projecao',
+'                                                     );',
 '                                                     ',
-'  l_n_america := world_map_projections.exibir_north_america ( p_largura  => l_largura',
-'                                                            , p_altura   => l_altura',
-'                                                           , p_projecao => l_projecao);',
+'  l_n_america := world_map_projections.exibir_continente ( p_continente => ''North America''',
+'                                                         , p_largura    => l_largura',
+'                                                         , p_altura     => l_altura',
+'                                                         , p_projecao   => l_projecao',
+'                                                         );',
 '                                                           ',
-'  l_oceania := world_map_projections.exibir_oceania ( p_largura  => l_largura',
-'                                                    , p_altura   => l_altura',
-'                                                    , p_projecao => l_projecao);',
+'  l_oceania := world_map_projections.exibir_continente ( p_continente => ''Oceania''',
+'                                                       , p_largura    => l_largura',
+'                                                       , p_altura     => l_altura',
+'                                                       , p_projecao   => l_projecao',
+'                                                       );',
 '                                                    ',
-'  l_setemares := world_map_projections.exibir_seven_seas ( p_largura  => l_largura',
-'                                                         , p_altura   => l_altura',
-'                                                         , p_projecao => l_projecao);',
+'  l_setemares := world_map_projections.exibir_continente ( p_continente => ''Seven seas (open ocean)''',
+'                                                         , p_largura    => l_largura',
+'                                                         , p_altura     => l_altura',
+'                                                         , p_projecao   => l_projecao',
+'                                                         );',
 '                                                         ',
-'  l_antartida := world_map_projections.exibir_antarctica ( p_largura  => l_largura',
-'                                                         , p_altura   => l_altura',
-'                                                         , p_projecao => l_projecao);',
+'  l_antartida := world_map_projections.exibir_continente ( p_continente => ''Antarctica''',
+'                                                         , p_largura    => l_largura',
+'                                                         , p_altura     => l_altura',
+'                                                         , p_projecao   => l_projecao',
+'                                                         );',
 '                                                         ',
-'  l_s_america := world_map_projections.exibir_south_america ( p_largura  => l_largura',
-'                                                            , p_altura   => l_altura',
-'                                                            , p_projecao => l_projecao);',
+'  l_s_america := world_map_projections.exibir_continente ( p_continente => ''South America''',
+'                                                         , p_largura    => l_largura',
+'                                                         , p_altura     => l_altura',
+'                                                         , p_projecao   => l_projecao',
+'                                                         );',
 '                                                            ',
-'  l_europa := world_map_projections.exibir_europe ( p_largura  => l_largura',
-'                                                  , p_altura   => l_altura',
-'                                                  , p_projecao => l_projecao);',
+'  l_europa := world_map_projections.exibir_continente ( p_continente => ''Europe''',
+'                                                      , p_largura    => l_largura',
+'                                                      , p_altura     => l_altura',
+'                                                      , p_projecao   => l_projecao',
+'                                                      );',
 '                                                  ',
-'  l_africa := world_map_projections.exibir_africa ( p_largura  => l_largura',
-'                                                  , p_altura   => l_altura',
-'                                                  , p_projecao => l_projecao);',
+'  l_africa := world_map_projections.exibir_continente ( p_continente => ''Africa''',
+'                                                      , p_largura    => l_largura',
+'                                                      , p_altura     => l_altura',
+'                                                      , p_projecao   => l_projecao',
+'                                                      );',
 '                                                  ',
-'  l_asia := world_map_projections.exibir_asia ( p_largura  => l_largura',
-'                                              , p_altura   => l_altura',
-'                                              , p_projecao => l_projecao);',
+'  l_asia := world_map_projections.exibir_continente ( p_continente => ''Asia''',
+'                                                    , p_largura    => l_largura',
+'                                                    , p_altura     => l_altura',
+'                                                    , p_projecao   => l_projecao',
+'                                                    );',
 '                                              ',
 '  l_cidades := world_map_projections.exibir_cidades ( p_largura  => l_largura',
 '                                                    , p_altura   => l_altura',
-'                                                    , p_projecao => l_projecao);',
+'                                                    , p_projecao => l_projecao',
+'                                                    );',
 '                                                    ',
 '  l_grade := world_map_projections.exibir_grade ( p_largura  => l_largura',
 '                                                , p_altura   => l_altura',
-'                                                , p_projecao => l_projecao);',
+'                                                , p_projecao => l_projecao',
+'                                                );',
 '                                                ',
 '  l_fechamento := world_map_projections.exibir_fechamento_svg;',
 '  ',

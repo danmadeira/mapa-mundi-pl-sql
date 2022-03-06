@@ -24,51 +24,71 @@ BEGIN
   l_abertura := world_map_projections.exibir_abertura_svg ( p_largura  => l_largura
                                                           , p_altura   => l_altura
                                                           , p_projecao => l_projecao
-                                                          , p_moldura => l_moldura);
+                                                          , p_moldura => l_moldura
+                                                          );
                                                           
   l_fundo := world_map_projections.exibir_fundo_azul ( p_largura  => l_largura
                                                      , p_altura   => l_altura
-                                                     , p_projecao => l_projecao);
+                                                     , p_projecao => l_projecao
+                                                     );
                                                      
-  l_n_america := world_map_projections.exibir_north_america ( p_largura  => l_largura
-                                                            , p_altura   => l_altura
-                                                           , p_projecao => l_projecao);
+  l_n_america := world_map_projections.exibir_continente ( p_continente => 'North America'
+                                                         , p_largura    => l_largura
+                                                         , p_altura     => l_altura
+                                                         , p_projecao   => l_projecao
+                                                         );
                                                            
-  l_oceania := world_map_projections.exibir_oceania ( p_largura  => l_largura
-                                                    , p_altura   => l_altura
-                                                    , p_projecao => l_projecao);
+  l_oceania := world_map_projections.exibir_continente ( p_continente => 'Oceania'
+                                                       , p_largura    => l_largura
+                                                       , p_altura     => l_altura
+                                                       , p_projecao   => l_projecao
+                                                       );
                                                     
-  l_setemares := world_map_projections.exibir_seven_seas ( p_largura  => l_largura
-                                                         , p_altura   => l_altura
-                                                         , p_projecao => l_projecao);
+  l_setemares := world_map_projections.exibir_continente ( p_continente => 'Seven seas (open ocean)'
+                                                         , p_largura    => l_largura
+                                                         , p_altura     => l_altura
+                                                         , p_projecao   => l_projecao
+                                                         );
                                                          
-  l_antartida := world_map_projections.exibir_antarctica ( p_largura  => l_largura
-                                                         , p_altura   => l_altura
-                                                         , p_projecao => l_projecao);
+  l_antartida := world_map_projections.exibir_continente ( p_continente => 'Antarctica'
+                                                         , p_largura    => l_largura
+                                                         , p_altura     => l_altura
+                                                         , p_projecao   => l_projecao
+                                                         );
                                                          
-  l_s_america := world_map_projections.exibir_south_america ( p_largura  => l_largura
-                                                            , p_altura   => l_altura
-                                                            , p_projecao => l_projecao);
+  l_s_america := world_map_projections.exibir_continente ( p_continente => 'South America'
+                                                         , p_largura    => l_largura
+                                                         , p_altura     => l_altura
+                                                         , p_projecao   => l_projecao
+                                                         );
                                                             
-  l_europa := world_map_projections.exibir_europe ( p_largura  => l_largura
-                                                  , p_altura   => l_altura
-                                                  , p_projecao => l_projecao);
+  l_europa := world_map_projections.exibir_continente ( p_continente => 'Europe'
+                                                      , p_largura    => l_largura
+                                                      , p_altura     => l_altura
+                                                      , p_projecao   => l_projecao
+                                                      );
                                                   
-  l_africa := world_map_projections.exibir_africa ( p_largura  => l_largura
-                                                  , p_altura   => l_altura
-                                                  , p_projecao => l_projecao);
+  l_africa := world_map_projections.exibir_continente ( p_continente => 'Africa'
+                                                      , p_largura    => l_largura
+                                                      , p_altura     => l_altura
+                                                      , p_projecao   => l_projecao
+                                                      );
                                                   
-  l_asia := world_map_projections.exibir_asia ( p_largura  => l_largura
-                                              , p_altura   => l_altura
-                                              , p_projecao => l_projecao);
+  l_asia := world_map_projections.exibir_continente ( p_continente => 'Asia'
+                                                    , p_largura    => l_largura
+                                                    , p_altura     => l_altura
+                                                    , p_projecao   => l_projecao
+                                                    );
                                               
   l_cidades := world_map_projections.exibir_cidades ( p_largura  => l_largura
                                                     , p_altura   => l_altura
-                                                    , p_projecao => l_projecao);
+                                                    , p_projecao => l_projecao
+                                                    );
                                                     
   l_grade := world_map_projections.exibir_grade ( p_largura  => l_largura
                                                 , p_altura   => l_altura
-                                                , p_projecao => l_projecao);
+                                                , p_projecao => l_projecao
+                                                );
                                                 
   l_fechamento := world_map_projections.exibir_fechamento_svg;
   
