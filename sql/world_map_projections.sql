@@ -2351,8 +2351,9 @@ AS
   --   @p_largura  = Tamanho horizontal da imagem do mapa em pontos
   --   @p_altura   = Tamanho vertical da imagem do mapa em pontos
   --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
+  --   @p_moldura  = Verdadeiro ou falso para construir um contorno na imagem
   -- Returns:
-  --   O elemento SVG do mapa-múndi
+  --   O elemento <svg>
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
