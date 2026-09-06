@@ -8,6 +8,7 @@ CREATE OR REPLACE PACKAGE world_map_projections
 -- Change History:
 --   15/01/22 Daniel Madeira: Versão inicial
 --   06/03/22 Daniel Madeira: Função unificada para os continentes
+--   06/09/26 Daniel Madeira: Projeção Equal Earth
 --   
 -- =================================================================================================
 AS
@@ -89,6 +90,60 @@ AS
     RETURN l_centro;
     
   END coordenar_centro;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 06/09/2026
+  -- Description: Converte a latitude geográfica em graus para latitude autálica também em graus.
+  --              * SNYDER, J. P. Map Projections - A Working Manual. p 16
+  --
+  -- Parameters:
+  --   @p_latitude  = Coordenada geográfica da distância ao Equador em graus em notação decimal
+  -- Returns:
+  --   A latitude autálica
+  --
+  -- Change History:
+  --   06/09/26 Daniel Madeira: Versão inicial
+  --
+  -- =================================================================================================
+  FUNCTION converter_geografica_para_autalica (
+    p_latitude IN NUMBER
+  )
+  RETURN NUMBER
+  IS
+    l_phi               NUMBER;
+    l_latitude_autalica NUMBER;
+    l_q                 NUMBER;
+    l_qp                NUMBER;
+    l_e                 CONSTANT NUMBER := 0.0818191908426;
+    l_e2                CONSTANT NUMBER := 0.00669437999014;
+
+  BEGIN
+    IF (abs(p_latitude) >= 90) THEN
+      RETURN p_latitude;
+    END IF;
+
+    l_phi := p_latitude * 3.14159265359 / 180;
+
+    l_q := (1 - l_e2)
+         * (
+             (sin(l_phi) / (1 - l_e2 * power(sin(l_phi), 2)))
+           - (1 / (2 * l_e))
+           * ln((1 - l_e * sin(l_phi)) / (1 + l_e * sin(l_phi)))
+           );
+
+    l_qp := (1 - l_e2)
+          * (
+              (1 / (1 - l_e2))
+            - (1 / (2 * l_e))
+            * ln((1 - l_e) / (1 + l_e))
+            );
+
+    l_latitude_autalica := asin(l_q / l_qp);
+
+    RETURN (l_latitude_autalica * 180 / 3.14159265359);
+
+  END converter_geografica_para_autalica;
 
   -- =================================================================================================
   -- Author:      Daniel Madeira
@@ -1363,6 +1418,89 @@ AS
 
   -- =================================================================================================
   -- Author:      Daniel Madeira
+  -- Create date: 06/09/2026
+  -- Description: Calcula a coordenada cartesiana X referente a projeção da longitude.
+  --              * ŠAVRIČ, B.; PATTERSON, T.; JENNY, B. The Equal Earth map projection. p 456
+  --
+  -- Parameters:
+  --   @p_latitude  = Coordenada geográfica da distância ao Equador em graus em notação decimal
+  --   @p_longitude = Coordenada geográfica da distância ao meridiano de Greenwich em graus em notação decimal
+  --   @p_raio      = Raio
+  -- Returns:
+  --   A coordenada X no plano cartesiano
+  --
+  -- Change History:
+  --   06/09/26 Daniel Madeira: Versão inicial
+  --
+  -- =================================================================================================
+  FUNCTION calcular_equal_earth_x (
+    p_latitude  IN NUMBER
+  , p_longitude IN NUMBER
+  , p_raio      IN NUMBER DEFAULT 1
+  )
+  RETURN NUMBER
+  IS
+    l_latitude  NUMBER;
+    l_longitude NUMBER;
+    l_theta     NUMBER;
+    l_sqrt3     CONSTANT NUMBER := SQRT(3);
+    l_A1        CONSTANT NUMBER :=  1.340264;
+    l_A2        CONSTANT NUMBER := -0.081106;
+    l_A3        CONSTANT NUMBER :=  0.000893;
+    l_A4        CONSTANT NUMBER :=  0.003796;
+
+  BEGIN
+    l_latitude := p_latitude * (3.14159265359 / 180);
+    l_longitude := p_longitude * (3.14159265359 / 180);
+
+    l_theta := asin((l_sqrt3 / 2) * sin(l_latitude));
+
+    RETURN ((p_raio * 2 * l_sqrt3 * l_longitude * cos(l_theta)) /
+            (3 * (l_A1 + 3 * l_A2 * power(l_theta, 2) + power(l_theta, 6) * (7 * l_A3 + 9 * l_A4 * power(l_theta, 2)))));
+
+  END calcular_equal_earth_x;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 06/09/2026
+  -- Description: Calcula a coordenada cartesiana Y referente a projeção da latitude.
+  --              * ŠAVRIČ, B.; PATTERSON, T.; JENNY, B. The Equal Earth map projection. p 456
+  --
+  -- Parameters:
+  --   @p_latitude  = Coordenada geográfica da distância ao Equador em graus em notação decimal
+  --   @p_raio      = Raio
+  -- Returns:
+  --   A coordenada Y no plano cartesiano
+  --
+  -- Change History:
+  --   06/09/26 Daniel Madeira: Versão inicial
+  --
+  -- =================================================================================================
+  FUNCTION calcular_equal_earth_y (
+    p_latitude IN NUMBER
+  , p_raio     IN NUMBER DEFAULT 1
+  )
+  RETURN NUMBER
+  IS
+    l_latitude NUMBER;
+    l_theta    NUMBER;
+    l_sqrt3    CONSTANT NUMBER := SQRT(3);
+    l_A1       CONSTANT NUMBER :=  1.340264;
+    l_A2       CONSTANT NUMBER := -0.081106;
+    l_A3       CONSTANT NUMBER :=  0.000893;
+    l_A4       CONSTANT NUMBER :=  0.003796;
+
+  BEGIN
+    l_latitude := p_latitude * (3.14159265359 / 180);
+
+    l_theta := asin((l_sqrt3 / 2) * sin(l_latitude));
+
+    RETURN (p_raio * l_theta * (l_A1 + l_A2 * power(l_theta, 2) + power(l_theta, 6) * (l_A3 + l_A4 * power(l_theta, 2))));
+
+  END calcular_equal_earth_y;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
   -- Create date: 15/01/2022
   -- Description: Calcula a coordenada cartesiana X referente a projeção da longitude.
   --
@@ -1377,6 +1515,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   06/09/26 Daniel Madeira: Projeção Equal Earth
   --   
   -- =================================================================================================
   FUNCTION converter_geo_pixel (
@@ -1443,7 +1582,16 @@ AS
         END IF;
         l_xy('x') := floor(l_centro('x') + (calcular_hammer_x (p_latitude, p_longitude) * l_modulo));
         l_xy('y') := floor(l_centro('y') - (calcular_hammer_y (p_latitude, p_longitude) * l_modulo));
-            
+
+      WHEN (p_projecao = 'i') THEN -- Equal Earth projection
+        IF (p_largura / p_altura < 2.05) THEN
+          l_modulo := p_largura / (calcular_equal_earth_x (converter_geografica_para_autalica(0), 180) * 2);
+        ELSE
+          l_modulo := p_altura / (calcular_equal_earth_y (converter_geografica_para_autalica(90)) * 2);
+        END IF;
+        l_xy('x') := floor(l_centro('x') + (calcular_equal_earth_x (converter_geografica_para_autalica(p_latitude), p_longitude) * l_modulo));
+        l_xy('y') := floor(l_centro('y') - (calcular_equal_earth_y (converter_geografica_para_autalica(p_latitude)) * l_modulo));
+
       WHEN (p_projecao = 'k') THEN -- Kavrayskiy VII projection
         IF (p_largura / p_altura < 1.733) THEN
           l_modulo := p_largura / (calcular_kavrayskiy_vii_x (0, 180) * 2);
