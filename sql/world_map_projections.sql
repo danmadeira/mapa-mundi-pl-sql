@@ -471,6 +471,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial (necessita ajuste pois está centrada no Polo Norte)
+  --   20/09/26 Daniel Madeira: Projeção centralizada no Equador (Lat 0, Lon 0)
   --   
   -- =================================================================================================
   FUNCTION calcular_gott_mugnolo_azimuthal_x (
@@ -481,12 +482,27 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_c         NUMBER;
+    l_k         NUMBER;
     
   BEGIN
     l_latitude := p_latitude * (3.14159265359 / 180);
     l_longitude := p_longitude * (3.14159265359 / 180);
-    RETURN (cos(l_longitude) * sin(0.446 * (3.14159265359 / 2 - l_latitude)));
-    
+
+    l_c := acos(cos(l_latitude) * cos(l_longitude));
+
+    IF (l_c < 1E-10) THEN
+      RETURN 0;
+    ELSE
+      IF (abs(sin(l_c)) < 1E-10) THEN
+        l_k := sin(0.446 * l_c) / 1E-10;
+      ELSE
+        l_k := sin(0.446 * l_c) / sin(l_c);
+      END IF;
+
+      RETURN (l_k * cos(l_latitude) * sin(l_longitude));
+    END IF;
+
   END calcular_gott_mugnolo_azimuthal_x;
 
   -- =================================================================================================
@@ -503,6 +519,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial (necessita ajuste pois está centrada no Polo Norte)
+  --   20/09/26 Daniel Madeira: Projeção centralizada no Equador (Lat 0, Lon 0)
   --   
   -- =================================================================================================
   FUNCTION calcular_gott_mugnolo_azimuthal_y (
@@ -513,12 +530,27 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_c         NUMBER;
+    l_k         NUMBER;
     
   BEGIN
     l_latitude := p_latitude * (3.14159265359 / 180);
     l_longitude := p_longitude * (3.14159265359 / 180);
-    RETURN (sin(l_longitude) * sin(0.446 * (3.14159265359 / 2 - l_latitude)));
-    
+
+    l_c := acos(cos(l_latitude) * cos(l_longitude));
+
+    IF (l_c < 1E-10) THEN
+      RETURN 0;
+    ELSE
+      IF (abs(sin(l_c)) < 1E-10) THEN
+        l_k := sin(0.446 * l_c) / 1E-10;
+      ELSE
+        l_k := sin(0.446 * l_c) / sin(l_c);
+      END IF;
+
+      RETURN (l_k * sin(l_latitude));
+    END IF;
+
   END calcular_gott_mugnolo_azimuthal_y;
 
   -- =================================================================================================
@@ -667,6 +699,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   20/09/26 Daniel Madeira: Checagem no denominador para evitar divisão por zero (NaN) no antípoda
   --   
   -- =================================================================================================
   FUNCTION calcular_lambert_azimuthal_equal_area_x (
@@ -675,19 +708,19 @@ AS
   )
   RETURN NUMBER
   IS
-    l_latitude  NUMBER;
-    l_longitude NUMBER;
-    l_k         NUMBER;
+    l_latitude    NUMBER;
+    l_longitude   NUMBER;
+    l_denominador NUMBER;
+    l_k           NUMBER;
     
   BEGIN
-    IF (p_latitude = 0 AND (p_longitude = 180 OR p_longitude = -180)) THEN -- estes dois pontos retornam NaN
-      l_latitude := 0.001;
-    ELSE
-      l_latitude := p_latitude;
-    END IF;
-    l_latitude := l_latitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (3.14159265359 / 180);
     l_longitude := p_longitude * (3.14159265359 / 180);
-    l_k := sqrt(2 / (1 + cos(l_latitude) * cos(l_longitude)));
+    l_denominador := 1 + cos(l_latitude) * cos(l_longitude);
+    IF (l_denominador < 1E-10) THEN
+      l_denominador := 1E-10;
+    END IF;
+    l_k := sqrt(2 / l_denominador);
     RETURN (l_k * cos(l_latitude) * sin(l_longitude));
     
   END calcular_lambert_azimuthal_equal_area_x;
@@ -706,6 +739,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   20/09/26 Daniel Madeira: Checagem no denominador para evitar divisão por zero (NaN) no antípoda
   --   
   -- =================================================================================================
   FUNCTION calcular_lambert_azimuthal_equal_area_y (
@@ -714,19 +748,19 @@ AS
   )
   RETURN NUMBER
   IS
-    l_latitude  NUMBER;
-    l_longitude NUMBER;
-    l_k         NUMBER;
+    l_latitude    NUMBER;
+    l_longitude   NUMBER;
+    l_denominador NUMBER;
+    l_k           NUMBER;
     
   BEGIN
-    IF (p_latitude = 0 AND (p_longitude = 180 OR p_longitude = -180)) THEN -- estes dois pontos retornam NaN
-      l_latitude := 0.001;
-    ELSE
-      l_latitude := p_latitude;
-    END IF;
-    l_latitude := l_latitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (3.14159265359 / 180);
     l_longitude := p_longitude * (3.14159265359 / 180);
-    l_k := sqrt(2 / (1 + cos(l_latitude) * cos(l_longitude)));
+    l_denominador := 1 + cos(l_latitude) * cos(l_longitude);
+    IF (l_denominador < 1E-10) THEN
+      l_denominador := 1E-10;
+    END IF;
+    l_k := sqrt(2 / l_denominador);
     RETURN (l_k * sin(l_latitude));
     
   END calcular_lambert_azimuthal_equal_area_y;
@@ -1516,6 +1550,8 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   06/09/26 Daniel Madeira: Projeção Equal Earth
+  --   20/09/26 Daniel Madeira: Projeção Gott–Mugnolo azimuthal centralizada no Equador
+  --   20/09/26 Daniel Madeira: Projeção Lambert azimuthal equal-area com diâmetro máximo igual a 4
   --   
   -- =================================================================================================
   FUNCTION converter_geo_pixel (
@@ -1565,11 +1601,11 @@ AS
         l_xy('x') := floor(l_centro('x') + (calcular_gott_equal_area_elliptical_x (p_latitude, p_longitude) * l_modulo));
         l_xy('y') := floor(l_centro('y') - (calcular_gott_equal_area_elliptical_y (p_latitude, p_longitude) * l_modulo));
          
-      WHEN (p_projecao = 'G') THEN -- Gott–Mugnolo azimuthal projection // (necessita ajuste pois está centrada no Polo Norte)
-        IF (p_largura / p_altura < 2) THEN
-          l_modulo := p_largura / (calcular_gott_mugnolo_azimuthal_x (0, 180) * 2);
+      WHEN (p_projecao = 'G') THEN -- Gott–Mugnolo azimuthal projection
+        IF (p_largura / p_altura < 1) THEN
+          l_modulo := p_largura / (sin(0.446 * 3.14159265359) * 2);
         ELSE
-          l_modulo := p_altura / (calcular_gott_mugnolo_azimuthal_y (90, 0) * 2);
+          l_modulo := p_altura / (sin(0.446 * 3.14159265359) * 2);
         END IF;
         l_xy('x') := floor(l_centro('x') + (calcular_gott_mugnolo_azimuthal_x (p_latitude, p_longitude) * l_modulo));
         l_xy('y') := floor(l_centro('y') - (calcular_gott_mugnolo_azimuthal_y (p_latitude, p_longitude) * l_modulo));
@@ -1600,12 +1636,12 @@ AS
         END IF;
         l_xy('x') := floor(l_centro('x') + (calcular_kavrayskiy_vii_x (p_latitude, p_longitude) * l_modulo));
         l_xy('y') := floor(l_centro('y') - (calcular_kavrayskiy_vii_y (p_latitude) * l_modulo));
-            
-      WHEN (p_projecao = 'l') THEN -- Lambert azimuthal equal-area projection // (necessita ajuste)
+
+      WHEN (p_projecao = 'l') THEN -- Lambert azimuthal equal-area projection
         IF (p_largura / p_altura < 1) THEN
-          l_modulo := p_largura / (calcular_lambert_azimuthal_equal_area_x (0, 180) * 3.14159265359);
+          l_modulo := p_largura / 4;
         ELSE
-          l_modulo := p_altura / (calcular_lambert_azimuthal_equal_area_y (90, 0) * 3.14159265359);
+          l_modulo := p_altura / 4;
         END IF;
         l_xy('x') := floor(l_centro('x') + (calcular_lambert_azimuthal_equal_area_x (p_latitude, p_longitude) * l_modulo));
         l_xy('y') := floor(l_centro('y') - (calcular_lambert_azimuthal_equal_area_y (p_latitude, p_longitude) * l_modulo));
@@ -1816,6 +1852,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   20/09/26 Daniel Madeira: Projeção Gott-Mugnolo (G) incluída na montagem por caminho
   --   
   -- =================================================================================================
   FUNCTION exibir_paralelos (
@@ -1831,7 +1868,7 @@ AS
     
   BEGIN
     FOR i IN 1 .. l_lat.count LOOP
-      IF p_projecao IN ('W', 'h', 'g', 'l') THEN
+      IF p_projecao IN ('W', 'h', 'g', 'G', 'l') THEN
         l_svg := l_svg || montar_caminho_paralelo (l_lat(i), p_largura, p_altura, p_projecao);
         l_svg := l_svg || montar_caminho_paralelo ((-1 * l_lat(i)), p_largura, p_altura, p_projecao);
       ELSE
@@ -2030,6 +2067,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   20/09/26 Daniel Madeira: Projeção Gott-Mugnolo (G) incluída na montagem por caminho
   --   
   -- =================================================================================================
   FUNCTION exibir_circulos (
@@ -2046,7 +2084,7 @@ AS
     l_antartico   NUMBER := -66.5622;
     
   BEGIN
-    IF p_projecao IN ('W', 'h', 'g', 'l') THEN
+    IF p_projecao IN ('W', 'h', 'g', 'G', 'l') THEN
       l_svg := l_svg || montar_caminho_circulo (l_cancer, p_largura, p_altura, p_projecao);
       l_svg := l_svg || montar_caminho_circulo (l_capricornio, p_largura, p_altura, p_projecao);
       l_svg := l_svg || montar_caminho_circulo (l_artico, p_largura, p_altura, p_projecao);
@@ -2075,6 +2113,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   20/09/26 Daniel Madeira: Projeção Gott-Mugnolo (G) incluída no W/E fixo
   --   
   -- =================================================================================================
   FUNCTION exibir_equador (
@@ -2093,7 +2132,7 @@ AS
   BEGIN
     l_w := -180;
     l_e := 180;
-    IF (p_projecao = 'l') THEN
+    IF (p_projecao = 'l' OR p_projecao = 'G') THEN
       l_w := l_w + 1;
       l_e := l_e - 1;
     END IF;
@@ -2417,6 +2456,8 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   16/01/22 Daniel Madeira: Comparação com ponto anterior
+  --   20/09/26 Daniel Madeira: Fundo circular na projeção Gott-Mugnolo (G)
+  --   20/09/26 Daniel Madeira: Projeção Lambert azimuthal equal-area com diâmetro máximo igual a 4
   --   
   -- =================================================================================================
   FUNCTION exibir_fundo_azul (
@@ -2435,12 +2476,12 @@ AS
     l_longitude NUMBER;
     
   BEGIN
-    IF (p_projecao = 'l') THEN
+    IF (p_projecao = 'l' OR p_projecao = 'G') THEN
       l_centro := coordenar_centro (p_largura, p_altura);
       IF ((p_largura / p_altura) < 1) THEN
-        l_raio := round (p_largura / calcular_lambert_azimuthal_equal_area_x (0, 180) / 3.14159265359 * 2);
+        l_raio := round (p_largura / 2);
       ELSE
-        l_raio := round (p_altura / calcular_lambert_azimuthal_equal_area_y (90, 0) / 3.14159265359 * 2);
+        l_raio := round (p_altura / 2);
       END IF;
       l_svg := '<circle cx="' || l_centro('x') || '" cy="' || l_centro('y') || '" r="' || l_raio || '" fill="rgb(174,214,241)" />' || chr(13) || chr(10);
     ELSE

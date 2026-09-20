@@ -17,7 +17,7 @@ DECLARE
   l_grade      VARCHAR2(32767);
   l_largura    NUMBER           := :P44_LARGURA;
   l_altura     NUMBER           := :P44_ALTURA;
-  l_projecao   VARCHAR2(1)      := :P44_PROJECAO;
+  l_projecao   VARCHAR2(3)      := :P44_PROJECAO;
   l_moldura    BOOLEAN          := false;
 
 BEGIN
