@@ -9,6 +9,8 @@ CREATE OR REPLACE PACKAGE world_map_projections
 --   15/01/22 Daniel Madeira: Versão inicial
 --   06/03/22 Daniel Madeira: Função unificada para os continentes
 --   06/09/26 Daniel Madeira: Projeção Equal Earth
+--   29/10/26 Daniel Madeira: Retornos em CLOB (evita ORA-06502 em imagens grandes),
+--                            procedimentos imprimir_clob e exibir_mapa
 --   
 -- =================================================================================================
 AS
@@ -28,7 +30,7 @@ AS
   , p_altura   IN NUMBER   DEFAULT 400
   , p_projecao IN VARCHAR2 DEFAULT 'c'
   )
-  RETURN VARCHAR2;
+  RETURN CLOB;
   
   FUNCTION exibir_continente (
     p_continente IN VARCHAR2
@@ -36,21 +38,32 @@ AS
   , p_altura     IN NUMBER   DEFAULT 400
   , p_projecao   IN VARCHAR2 DEFAULT 'c'
   )
-  RETURN VARCHAR2;
+  RETURN CLOB;
   
   FUNCTION exibir_cidades (
     p_largura  IN NUMBER   DEFAULT 800
   , p_altura   IN NUMBER   DEFAULT 400
   , p_projecao IN VARCHAR2 DEFAULT 'c'
   )
-  RETURN VARCHAR2;
+  RETURN CLOB;
   
   FUNCTION exibir_grade (
     p_largura  IN NUMBER   DEFAULT 800
   , p_altura   IN NUMBER   DEFAULT 400
   , p_projecao IN VARCHAR2 DEFAULT 'c'
   )
-  RETURN VARCHAR2;
+  RETURN CLOB;
+  
+  PROCEDURE imprimir_clob (
+    p_clob IN CLOB
+  );
+  
+  PROCEDURE exibir_mapa (
+    p_largura  IN NUMBER   DEFAULT 800
+  , p_altura   IN NUMBER   DEFAULT 400
+  , p_projecao IN VARCHAR2 DEFAULT 'c'
+  , p_moldura  IN BOOLEAN  DEFAULT false
+  );
   
 END world_map_projections;
 /
@@ -60,6 +73,138 @@ CREATE OR REPLACE PACKAGE BODY world_map_projections
 AS
 
   TYPE coordenadas_xy_t IS TABLE OF NUMBER INDEX BY VARCHAR2(1);
+
+  -- Acumulador de texto SVG: bufferiza em VARCHAR2 e descarrega no CLOB quando o buffer enche,
+  -- evitando o limite de 32767 bytes do VARCHAR2 e o custo de concatenar CLOB a cada trecho.
+  TYPE svg_t IS RECORD (
+    conteudo CLOB
+  , buffer   VARCHAR2(32767 BYTE)
+  );
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 29/10/2026
+  -- Description: Inicializa o acumulador de texto SVG com um CLOB temporário.
+  --
+  -- Parameters:
+  --   @p_svg = Acumulador a ser inicializado
+  --
+  -- Change History:
+  --   29/10/26 Daniel Madeira: Versão inicial
+  --
+  -- =================================================================================================
+  PROCEDURE svg_iniciar (
+    p_svg IN OUT NOCOPY svg_t
+  )
+  IS
+  BEGIN
+    dbms_lob.createtemporary (p_svg.conteudo, true, dbms_lob.call);
+    p_svg.buffer := NULL;
+
+  END svg_iniciar;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 29/10/2026
+  -- Description: Descarrega o buffer no CLOB.
+  --
+  -- Parameters:
+  --   @p_svg = Acumulador
+  --
+  -- Change History:
+  --   29/10/26 Daniel Madeira: Versão inicial
+  --
+  -- =================================================================================================
+  PROCEDURE svg_descarregar (
+    p_svg IN OUT NOCOPY svg_t
+  )
+  IS
+  BEGIN
+    IF p_svg.buffer IS NOT NULL THEN
+      dbms_lob.writeappend (p_svg.conteudo, length(p_svg.buffer), p_svg.buffer);
+      p_svg.buffer := NULL;
+    END IF;
+
+  END svg_descarregar;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 29/10/2026
+  -- Description: Anexa um trecho de texto ao acumulador SVG.
+  --
+  -- Parameters:
+  --   @p_svg   = Acumulador
+  --   @p_texto = Trecho a ser anexado
+  --
+  -- Change History:
+  --   29/10/26 Daniel Madeira: Versão inicial
+  --
+  -- =================================================================================================
+  PROCEDURE svg_anexar (
+    p_svg   IN OUT NOCOPY svg_t
+  , p_texto IN VARCHAR2
+  )
+  IS
+  BEGIN
+    IF p_texto IS NULL THEN
+      RETURN;
+    END IF;
+    IF nvl(lengthb(p_svg.buffer), 0) + lengthb(p_texto) > 32767 THEN
+      svg_descarregar (p_svg);
+    END IF;
+    p_svg.buffer := p_svg.buffer || p_texto;
+
+  END svg_anexar;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 29/10/2026
+  -- Description: Finaliza o acumulador SVG.
+  --
+  -- Parameters:
+  --   @p_svg = Acumulador
+  -- Returns:
+  --   O CLOB com todo o texto acumulado
+  --
+  -- Change History:
+  --   29/10/26 Daniel Madeira: Versão inicial
+  --
+  -- =================================================================================================
+  FUNCTION svg_finalizar (
+    p_svg IN OUT NOCOPY svg_t
+  )
+  RETURN CLOB
+  IS
+  BEGIN
+    svg_descarregar (p_svg);
+    RETURN p_svg.conteudo;
+
+  END svg_finalizar;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 29/10/2026
+  -- Description: Normaliza o código da projeção, removendo aspas e espaços que possam vir da URL
+  --              (ex.: 'e' com aspas simples) e mantendo apenas o primeiro caractere.
+  --
+  -- Parameters:
+  --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
+  -- Returns:
+  --   O código normalizado (padrão 'c')
+  --
+  -- Change History:
+  --   29/10/26 Daniel Madeira: Versão inicial
+  --
+  -- =================================================================================================
+  FUNCTION normalizar_projecao (
+    p_projecao IN VARCHAR2
+  )
+  RETURN VARCHAR2
+  IS
+  BEGIN
+    RETURN nvl(substr(trim(replace(replace(p_projecao, ''''), '"')), 1, 1), 'c');
+
+  END normalizar_projecao;
 
   -- =================================================================================================
   -- Author:      Daniel Madeira
@@ -181,7 +326,7 @@ AS
       l_cost := cos(l_theta);
       l_v := (l_theta + l_sint * l_cost + 2 * l_sint - l_k) / (2 * l_cost * (1 + l_cost));
       l_theta := l_theta - l_v;
-      EXIT WHEN (abs(l_v) < '1E-7');
+      EXIT WHEN (abs(l_v) < 1E-7);
     END LOOP;
     RETURN l_theta;
     
@@ -275,7 +420,7 @@ AS
     FOR i IN REVERSE 1 .. 10 LOOP
       l_v := (l_theta + sin(l_theta) - l_k) / (1 + cos(l_theta));
       l_theta := l_theta - l_v;
-      EXIT WHEN (abs(l_v) < '1E-7');
+      EXIT WHEN (abs(l_v) < 1E-7);
     END LOOP;
     RETURN l_theta;
     
@@ -352,6 +497,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   29/10/26 Daniel Madeira: Corrigida a detecção de não convergência na última iteração
   --   
   -- =================================================================================================
   FUNCTION calcular_gott_equal_area_elliptical_x (
@@ -365,22 +511,22 @@ AS
     l_phi       NUMBER;
     l_k         NUMBER;
     l_v         NUMBER;
-    l_fim       BOOLEAN := false;
+    l_convergiu BOOLEAN := false;
     
   BEGIN
     l_longitude := p_longitude * (3.14159265359 / 180);
     l_theta := p_latitude * (3.14159265359 / 180);
     l_phi := asin(cos(l_theta) * sin(l_longitude / 2));
     l_k := 3.14159265359 * sin(l_phi);
-    FOR i IN REVERSE 1 .. 10 LOOP
+    FOR i IN 1 .. 10 LOOP
       l_v := (l_theta + sin(l_theta) - l_k) / (1 + cos(l_theta));
       l_theta := l_theta - l_v;
-      IF (i = 1) THEN
-        l_fim := true;
+      IF (abs(l_v) < 1E-7) THEN
+        l_convergiu := true;
+        EXIT;
       END IF;
-      EXIT WHEN (abs(l_v) < '1E-7');
     END LOOP;
-    IF l_fim THEN
+    IF NOT l_convergiu THEN
       IF (l_theta < 0) THEN
         l_theta := (-3.14159265359 / 2);
       ELSE
@@ -407,6 +553,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   29/10/26 Daniel Madeira: Corrigida a detecção de não convergência na última iteração
   --   
   -- =================================================================================================
   FUNCTION calcular_gott_equal_area_elliptical_y (
@@ -421,7 +568,7 @@ AS
     l_k         NUMBER;
     l_lambda    NUMBER;
     l_v         NUMBER;
-    l_fim       BOOLEAN := false;
+    l_convergiu BOOLEAN := false;
     
   BEGIN
     IF (p_longitude = 180) THEN -- remendo para limitar em 179
@@ -436,15 +583,15 @@ AS
     l_phi := asin(cos(l_theta) * sin(l_longitude / 2));
     l_k := 3.14159265359 * sin(l_phi);
     l_lambda := 0.5 * asin(sin(l_theta) / cos(l_phi));
-    FOR i IN REVERSE 1 .. 10 LOOP
+    FOR i IN 1 .. 10 LOOP
       l_v := (l_theta + sin(l_theta) - l_k) / (1 + cos(l_theta));
       l_theta := l_theta - l_v;
-      IF (i = 1) THEN
-        l_fim := true;
+      IF (abs(l_v) < 1E-7) THEN
+        l_convergiu := true;
+        EXIT;
       END IF;
-      EXIT WHEN (abs(l_v) < '1E-7');
     END LOOP;
-    IF l_fim THEN
+    IF NOT l_convergiu THEN
       IF (l_theta < 0) THEN
         l_theta := (-3.14159265359 / 2);
       ELSE
@@ -907,6 +1054,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   29/10/26 Daniel Madeira: Corrigida a detecção de não convergência na última iteração
   --   
   -- =================================================================================================
   FUNCTION calcular_mollweide_theta (
@@ -914,23 +1062,23 @@ AS
   )
   RETURN NUMBER
   IS
-    l_theta NUMBER;
-    l_k     NUMBER;
-    l_v     NUMBER;
-    l_fim   BOOLEAN := false;
+    l_theta     NUMBER;
+    l_k         NUMBER;
+    l_v         NUMBER;
+    l_convergiu BOOLEAN := false;
     
   BEGIN
     l_theta := p_latitude * (3.14159265359 / 180);
     l_k := 3.14159265359 * sin(l_theta);
-    FOR i IN REVERSE 1 .. 10 LOOP
+    FOR i IN 1 .. 10 LOOP
       l_v := (l_theta + sin(l_theta) - l_k) / (1 + cos(l_theta));
       l_theta := l_theta - l_v;
-      IF (i = 1) THEN
-        l_fim := true;
+      IF (abs(l_v) < 1E-7) THEN
+        l_convergiu := true;
+        EXIT;
       END IF;
-      EXIT WHEN (abs(l_v) < '1E-7');
     END LOOP;
-    IF l_fim THEN
+    IF NOT l_convergiu THEN
       IF (l_theta < 0) THEN
         l_theta := (-3.14159265359 / 2);
       ELSE
@@ -1392,6 +1540,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   29/10/26 Daniel Madeira: sinc(0) = 1 para evitar divisão por zero (ORA-01476) em (0, 0)
   --   
   -- =================================================================================================
   FUNCTION calcular_winkel_iii_x (
@@ -1409,7 +1558,11 @@ AS
     l_latitude := p_latitude * (3.14159265359 / 180);
     l_longitude := p_longitude * (3.14159265359 / 180);
     l_alpha := acos(cos(l_latitude) * cos(l_longitude / 2));
-    l_sinc := sin(l_alpha) / l_alpha;
+    IF (l_alpha < 1E-10) THEN -- limite de sin(a)/a quando a -> 0
+      l_sinc := 1;
+    ELSE
+      l_sinc := sin(l_alpha) / l_alpha;
+    END IF;
     RETURN ((1 / 2) * (l_longitude * cos(acos(2 / 3.14159265359)) + ((2 * cos(l_latitude) * sin(l_longitude / 2)) / (l_sinc))));
     
   END calcular_winkel_iii_x;
@@ -1428,6 +1581,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   29/10/26 Daniel Madeira: sinc(0) = 1 para evitar divisão por zero (ORA-01476) em (0, 0)
   --   
   -- =================================================================================================
   FUNCTION calcular_winkel_iii_y (
@@ -1445,7 +1599,11 @@ AS
     l_latitude := p_latitude * (3.14159265359 / 180);
     l_longitude := p_longitude * (3.14159265359 / 180);
     l_alpha := acos(cos(l_latitude) * cos(l_longitude / 2));
-    l_sinc := sin(l_alpha) / l_alpha;
+    IF (l_alpha < 1E-10) THEN -- limite de sin(a)/a quando a -> 0
+      l_sinc := 1;
+    ELSE
+      l_sinc := sin(l_alpha) / l_alpha;
+    END IF;
     RETURN ((1 / 2) * (l_latitude + (sin(l_latitude) / (l_sinc))));
     
   END calcular_winkel_iii_y;
@@ -1847,36 +2005,34 @@ AS
   --   @p_largura  = Tamanho horizontal da imagem do mapa em pontos
   --   @p_altura   = Tamanho vertical da imagem do mapa em pontos
   --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
-  -- Returns:
-  --   Os elementos <path> ou <line> em SVG para os paralelos
+  --   @p_svg      = Acumulador onde os elementos <path> ou <line> em SVG dos paralelos são anexados
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   20/09/26 Daniel Madeira: Projeção Gott-Mugnolo (G) incluída na montagem por caminho
+  --   29/10/26 Daniel Madeira: Convertida em procedimento que anexa ao acumulador (sem limite de 32767)
   --   
   -- =================================================================================================
-  FUNCTION exibir_paralelos (
+  PROCEDURE exibir_paralelos (
     p_largura  IN NUMBER
   , p_altura   IN NUMBER
   , p_projecao IN VARCHAR2
+  , p_svg      IN OUT NOCOPY svg_t
   )
-  RETURN VARCHAR2
   IS
     TYPE lat_type IS TABLE OF NUMBER;
     l_lat lat_type := lat_type (15, 30, 45, 60, 75, 90);
-    l_svg VARCHAR2(32767);
     
   BEGIN
     FOR i IN 1 .. l_lat.count LOOP
       IF p_projecao IN ('W', 'h', 'g', 'G', 'l') THEN
-        l_svg := l_svg || montar_caminho_paralelo (l_lat(i), p_largura, p_altura, p_projecao);
-        l_svg := l_svg || montar_caminho_paralelo ((-1 * l_lat(i)), p_largura, p_altura, p_projecao);
+        svg_anexar (p_svg, montar_caminho_paralelo (l_lat(i), p_largura, p_altura, p_projecao));
+        svg_anexar (p_svg, montar_caminho_paralelo ((-1 * l_lat(i)), p_largura, p_altura, p_projecao));
       ELSE
-        l_svg := l_svg || montar_linha_paralelo (l_lat(i), p_largura, p_altura, p_projecao);
-        l_svg := l_svg || montar_linha_paralelo ((-1 * l_lat(i)), p_largura, p_altura, p_projecao);
+        svg_anexar (p_svg, montar_linha_paralelo (l_lat(i), p_largura, p_altura, p_projecao));
+        svg_anexar (p_svg, montar_linha_paralelo ((-1 * l_lat(i)), p_largura, p_altura, p_projecao));
       END IF;
     END LOOP;
-    RETURN l_svg;
     
   END exibir_paralelos;
 
@@ -1939,30 +2095,28 @@ AS
   --   @p_largura  = Tamanho horizontal da imagem do mapa em pontos
   --   @p_altura   = Tamanho vertical da imagem do mapa em pontos
   --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
-  -- Returns:
-  --   Os elementos <path> em SVG para os meridianos
+  --   @p_svg      = Acumulador onde os elementos <path> em SVG dos meridianos são anexados
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   29/10/26 Daniel Madeira: Convertida em procedimento que anexa ao acumulador (sem limite de 32767)
   --   
   -- =================================================================================================
-  FUNCTION exibir_meridianos (
+  PROCEDURE exibir_meridianos (
     p_largura  IN NUMBER
   , p_altura   IN NUMBER
   , p_projecao IN VARCHAR2
+  , p_svg      IN OUT NOCOPY svg_t
   )
-  RETURN VARCHAR2
   IS
     TYPE lon_type IS TABLE OF NUMBER;
     l_lon lon_type := lon_type (15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180);
-    l_svg VARCHAR2(32767);
     
   BEGIN
     FOR i IN 1 .. l_lon.count LOOP
-      l_svg := l_svg || montar_caminho_meridiano ((-1 * l_lon(i)), p_largura, p_altura, p_projecao);
-      l_svg := l_svg || montar_caminho_meridiano (l_lon(i), p_largura, p_altura, p_projecao);
+      svg_anexar (p_svg, montar_caminho_meridiano ((-1 * l_lon(i)), p_largura, p_altura, p_projecao));
+      svg_anexar (p_svg, montar_caminho_meridiano (l_lon(i), p_largura, p_altura, p_projecao));
     END LOOP;
-    RETURN l_svg;
     
   END exibir_meridianos;
 
@@ -2062,22 +2216,21 @@ AS
   --   @p_largura  = Tamanho horizontal da imagem do mapa em pontos
   --   @p_altura   = Tamanho vertical da imagem do mapa em pontos
   --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
-  -- Returns:
-  --   Os elementos <path> ou <line> em SVG para os círculos e trópicos
+  --   @p_svg      = Acumulador onde os elementos <path> ou <line> em SVG dos círculos e trópicos são anexados
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   20/09/26 Daniel Madeira: Projeção Gott-Mugnolo (G) incluída na montagem por caminho
+  --   29/10/26 Daniel Madeira: Convertida em procedimento que anexa ao acumulador (sem limite de 32767)
   --   
   -- =================================================================================================
-  FUNCTION exibir_circulos (
+  PROCEDURE exibir_circulos (
     p_largura  IN NUMBER
   , p_altura   IN NUMBER
   , p_projecao IN VARCHAR2
+  , p_svg      IN OUT NOCOPY svg_t
   )
-  RETURN VARCHAR2
   IS
-    l_svg         VARCHAR2(32767);
     l_cancer      NUMBER := 23.43656;
     l_capricornio NUMBER := -23.43656;
     l_artico      NUMBER := 66.5622;
@@ -2085,17 +2238,16 @@ AS
     
   BEGIN
     IF p_projecao IN ('W', 'h', 'g', 'G', 'l') THEN
-      l_svg := l_svg || montar_caminho_circulo (l_cancer, p_largura, p_altura, p_projecao);
-      l_svg := l_svg || montar_caminho_circulo (l_capricornio, p_largura, p_altura, p_projecao);
-      l_svg := l_svg || montar_caminho_circulo (l_artico, p_largura, p_altura, p_projecao);
-      l_svg := l_svg || montar_caminho_circulo (l_antartico, p_largura, p_altura, p_projecao);
+      svg_anexar (p_svg, montar_caminho_circulo (l_cancer, p_largura, p_altura, p_projecao));
+      svg_anexar (p_svg, montar_caminho_circulo (l_capricornio, p_largura, p_altura, p_projecao));
+      svg_anexar (p_svg, montar_caminho_circulo (l_artico, p_largura, p_altura, p_projecao));
+      svg_anexar (p_svg, montar_caminho_circulo (l_antartico, p_largura, p_altura, p_projecao));
     ELSE
-      l_svg := l_svg || montar_linha_circulo (l_cancer, p_largura, p_altura, p_projecao);
-      l_svg := l_svg || montar_linha_circulo (l_capricornio, p_largura, p_altura, p_projecao);
-      l_svg := l_svg || montar_linha_circulo (l_artico, p_largura, p_altura, p_projecao);
-      l_svg := l_svg || montar_linha_circulo (l_antartico, p_largura, p_altura, p_projecao);
+      svg_anexar (p_svg, montar_linha_circulo (l_cancer, p_largura, p_altura, p_projecao));
+      svg_anexar (p_svg, montar_linha_circulo (l_capricornio, p_largura, p_altura, p_projecao));
+      svg_anexar (p_svg, montar_linha_circulo (l_artico, p_largura, p_altura, p_projecao));
+      svg_anexar (p_svg, montar_linha_circulo (l_antartico, p_largura, p_altura, p_projecao));
     END IF;
-    RETURN l_svg;
     
   END exibir_circulos;
 
@@ -2192,6 +2344,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   29/10/26 Daniel Madeira: Retorno em CLOB
   --   
   -- =================================================================================================
   FUNCTION exibir_grade (
@@ -2199,21 +2352,23 @@ AS
   , p_altura   IN NUMBER   DEFAULT 400
   , p_projecao IN VARCHAR2 DEFAULT 'c'
   )
-  RETURN VARCHAR2
+  RETURN CLOB
   IS
-    l_svg VARCHAR2(32767);
+    l_svg      svg_t;
+    l_projecao VARCHAR2(1) := normalizar_projecao (p_projecao);
     
   BEGIN
-    l_svg := '<g fill="none" stroke="rgb(240,240,240)" stroke-width="1">' || chr(13) || chr(10);
+    svg_iniciar (l_svg);
+    svg_anexar (l_svg, '<g fill="none" stroke="rgb(240,240,240)" stroke-width="1">' || chr(13) || chr(10));
     
-    l_svg := l_svg || exibir_paralelos (p_largura, p_altura, p_projecao);
-    l_svg := l_svg || exibir_meridianos (p_largura, p_altura, p_projecao);
-    l_svg := l_svg || exibir_circulos (p_largura, p_altura, p_projecao);
-    l_svg := l_svg || exibir_equador (p_largura, p_altura, p_projecao);
-    l_svg := l_svg || exibir_greenwich (p_largura, p_altura, p_projecao);
+    exibir_paralelos (p_largura, p_altura, l_projecao, l_svg);
+    exibir_meridianos (p_largura, p_altura, l_projecao, l_svg);
+    exibir_circulos (p_largura, p_altura, l_projecao, l_svg);
+    svg_anexar (l_svg, exibir_equador (p_largura, p_altura, l_projecao));
+    svg_anexar (l_svg, exibir_greenwich (p_largura, p_altura, l_projecao));
     
-    l_svg := l_svg || '</g>' || chr(13) || chr(10);
-    RETURN l_svg;
+    svg_anexar (l_svg, '</g>' || chr(13) || chr(10));
+    RETURN svg_finalizar (l_svg);
     
   END exibir_grade;
 
@@ -2231,6 +2386,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   29/10/26 Daniel Madeira: Retorno em CLOB
   --   
   -- =================================================================================================
   FUNCTION exibir_cidades (
@@ -2238,7 +2394,7 @@ AS
   , p_altura   IN NUMBER   DEFAULT 400
   , p_projecao IN VARCHAR2 DEFAULT 'c'
   )
-  RETURN VARCHAR2
+  RETURN CLOB
   IS
     CURSOR c_cidades
     IS
@@ -2249,7 +2405,8 @@ AS
          AND capital = 'primary'
     ORDER BY population;
     
-    l_svg       VARCHAR2(32767);
+    l_svg       svg_t;
+    l_projecao  VARCHAR2(1) := normalizar_projecao (p_projecao);
     l_r         NUMBER;
     l_latitude  NUMBER;
     l_longitude NUMBER;
@@ -2257,18 +2414,19 @@ AS
     l_titulo    VARCHAR2(200);
     
   BEGIN
-    l_svg := '<g fill="rgb(33,42,116)" stroke-width="0" onmouseover="evt.target.setAttribute(''fill'', ''blue'');" onmouseout="evt.target.setAttribute(''fill'',''red'');">' || chr(13) || chr(10);
+    svg_iniciar (l_svg);
+    svg_anexar (l_svg, '<g fill="rgb(33,42,116)" stroke-width="0" onmouseover="evt.target.setAttribute(''fill'', ''blue'');" onmouseout="evt.target.setAttribute(''fill'',''red'');">' || chr(13) || chr(10));
     l_r := round(p_largura * 0.002);
     FOR cidade IN c_cidades LOOP
       l_latitude := cidade.lat;
       l_longitude := cidade.lng;
-      l_ponto := converter_geo_pixel (l_latitude, l_longitude, p_largura, p_altura, p_projecao);
+      l_ponto := converter_geo_pixel (l_latitude, l_longitude, p_largura, p_altura, l_projecao);
       l_titulo := cidade.city || ' (' || cidade.country || ')';
-      l_svg := l_svg || '<circle id="' || cidade.id || '" cx="' || l_ponto('x') || '" cy="' || l_ponto('y') || '" r="' || l_r || '"><title>' || l_titulo || '</title></circle>' || chr(13) || chr(10);
+      svg_anexar (l_svg, '<circle id="' || cidade.id || '" cx="' || l_ponto('x') || '" cy="' || l_ponto('y') || '" r="' || l_r || '"><title>' || l_titulo || '</title></circle>' || chr(13) || chr(10));
     END LOOP;
-    l_svg := l_svg || '</g>' || chr(13) || chr(10);
+    svg_anexar (l_svg, '</g>' || chr(13) || chr(10));
     
-    RETURN l_svg;
+    RETURN svg_finalizar (l_svg);
     
   END exibir_cidades;
 
@@ -2282,46 +2440,52 @@ AS
   --   @p_largura  = Tamanho horizontal da imagem do mapa em pontos
   --   @p_altura   = Tamanho vertical da imagem do mapa em pontos
   --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
-  -- Returns:
-  --   Os respectivos pontos no plano cartesiano
+  --   @p_svg      = Acumulador onde o elemento <polygon> em SVG é anexado
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   29/10/26 Daniel Madeira: Convertida em procedimento que anexa o <polygon> ao acumulador
+  --                            (remove o limite de 8000 bytes por anel) e não descarta mais um
+  --                            primeiro ponto que caia exatamente no pixel (0, 0)
   --   
   -- =================================================================================================
-  FUNCTION extrair_poligono (
+  PROCEDURE extrair_poligono (
     p_poligono IN json_array_t
   , p_largura  IN NUMBER
   , p_altura   IN NUMBER
   , p_projecao IN VARCHAR2
+  , p_svg      IN OUT NOCOPY svg_t
   )
-  RETURN VARCHAR2
   IS
     l_coordenadas json_array_t;
     l_latitude    NUMBER;
     l_longitude   NUMBER;
     l_ponto       coordenadas_xy_t;
     l_anterior    coordenadas_xy_t;
-    l_pontos      VARCHAR2(8000);
+    l_primeiro    BOOLEAN := true;
     
   BEGIN
-    l_anterior('x') := 0;
-    l_anterior('y') := 0;
+    IF (p_poligono IS NULL) OR (p_poligono.get_size = 0) THEN
+      RETURN;
+    END IF;
+    svg_anexar (p_svg, '<polygon points="');
     FOR i IN 0 .. p_poligono.get_size - 1 LOOP
       l_coordenadas := treat(p_poligono.get(i) AS json_array_t);
       l_latitude := l_coordenadas.get_number(1);
       l_longitude := l_coordenadas.get_number(0);
       l_ponto := converter_geo_pixel (l_latitude, l_longitude, p_largura, p_altura, p_projecao);
-      IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
-        IF l_pontos IS NOT NULL THEN
-          l_pontos := l_pontos || ' ';
-        END IF;
-        l_pontos := l_pontos || l_ponto('x') || ',' || l_ponto('y');
+      IF l_primeiro THEN
+        svg_anexar (p_svg, l_ponto('x') || ',' || l_ponto('y'));
+        l_primeiro := false;
+        l_anterior('x') := l_ponto('x');
+        l_anterior('y') := l_ponto('y');
+      ELSIF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
+        svg_anexar (p_svg, ' ' || l_ponto('x') || ',' || l_ponto('y'));
         l_anterior('x') := l_ponto('x');
         l_anterior('y') := l_ponto('y');
       END IF;
     END LOOP;
-    RETURN l_pontos;
+    svg_anexar (p_svg, '" />' || chr(13) || chr(10));
     
   END extrair_poligono;
   
@@ -2372,6 +2536,7 @@ AS
   --
   -- Change History:
   --   06/03/22 Daniel Madeira: Versão inicial
+  --   29/10/26 Daniel Madeira: Retorno em CLOB
   --   
   -- =================================================================================================
   FUNCTION exibir_continente (
@@ -2380,9 +2545,10 @@ AS
   , p_altura     IN NUMBER   DEFAULT 400
   , p_projecao   IN VARCHAR2 DEFAULT 'c'
   )
-  RETURN VARCHAR2
+  RETURN CLOB
   IS
-    l_svg         VARCHAR2(32767);
+    l_svg         svg_t;
+    l_projecao    VARCHAR2(1) := normalizar_projecao (p_projecao);
     l_blob        BLOB;
     l_object      json_object_t;
     l_features    json_array_t;
@@ -2394,12 +2560,9 @@ AS
     l_coordinates json_array_t;
     l_nested_1    json_array_t;
     l_nested_2    json_array_t;
-    l_coordenadas json_array_t;
-    l_latitude    NUMBER;
-    l_longitude   NUMBER;
-    l_pontos      VARCHAR2(8000);
   BEGIN
-    l_svg := '<g fill="rgb(200,200,200)" fill-rule="nonzero" stroke="rgb(152,152,152)" stroke-width="1">' || chr(13) || chr(10);
+    svg_iniciar (l_svg);
+    svg_anexar (l_svg, '<g fill="rgb(200,200,200)" fill-rule="nonzero" stroke="rgb(152,152,152)" stroke-width="1">' || chr(13) || chr(10));
     
     l_blob := carregar_arquivo_json;
     l_object := new json_object_t (l_blob);
@@ -2416,28 +2579,22 @@ AS
         IF (l_type = 'Polygon') THEN
           FOR j IN 0 .. l_coordinates.get_size - 1 LOOP
             l_nested_1 := treat(l_coordinates.get(j) AS json_array_t);
-            l_pontos := extrair_poligono (l_nested_1, p_largura, p_altura, p_projecao);
-            IF l_pontos IS NOT NULL THEN
-              l_svg := l_svg || '<polygon points="' || l_pontos || '" />' || chr(13) || chr(10);
-            END IF;
+            extrair_poligono (l_nested_1, p_largura, p_altura, l_projecao, l_svg);
           END LOOP;
         ELSIF (l_type = 'MultiPolygon') THEN
           FOR j IN 0 .. l_coordinates.get_size - 1 LOOP
             l_nested_1 := treat(l_coordinates.get(j) AS json_array_t);
             FOR k IN 0 .. l_nested_1.get_size - 1 LOOP
               l_nested_2 := treat(l_nested_1.get(k) AS json_array_t);
-              l_pontos := extrair_poligono (l_nested_2, p_largura, p_altura, p_projecao);
-              IF l_pontos IS NOT NULL THEN
-                l_svg := l_svg || '<polygon points="' || l_pontos || '" />' || chr(13) || chr(10);
-              END IF;
+              extrair_poligono (l_nested_2, p_largura, p_altura, l_projecao, l_svg);
             END LOOP;
           END LOOP;
         END IF;
       END IF;
     END LOOP;
 
-    l_svg := l_svg || '</g>' || chr(13) || chr(10);
-    RETURN l_svg;
+    svg_anexar (l_svg, '</g>' || chr(13) || chr(10));
+    RETURN svg_finalizar (l_svg);
 
   END exibir_continente;
 
@@ -2458,6 +2615,7 @@ AS
   --   16/01/22 Daniel Madeira: Comparação com ponto anterior
   --   20/09/26 Daniel Madeira: Fundo circular na projeção Gott-Mugnolo (G)
   --   20/09/26 Daniel Madeira: Projeção Lambert azimuthal equal-area com diâmetro máximo igual a 4
+  --   29/10/26 Daniel Madeira: Retorno em CLOB e normalização do código da projeção
   --   
   -- =================================================================================================
   FUNCTION exibir_fundo_azul (
@@ -2465,9 +2623,10 @@ AS
   , p_altura   IN NUMBER   DEFAULT 400
   , p_projecao IN VARCHAR2 DEFAULT 'c'
   )
-  RETURN VARCHAR2
+  RETURN CLOB
   IS
     l_svg       VARCHAR2(32767);
+    l_projecao  VARCHAR2(1) := normalizar_projecao (p_projecao);
     l_centro    coordenadas_xy_t;
     l_raio      NUMBER;
     l_ponto     coordenadas_xy_t;
@@ -2476,7 +2635,7 @@ AS
     l_longitude NUMBER;
     
   BEGIN
-    IF (p_projecao = 'l' OR p_projecao = 'G') THEN
+    IF (l_projecao = 'l' OR l_projecao = 'G') THEN
       l_centro := coordenar_centro (p_largura, p_altura);
       IF ((p_largura / p_altura) < 1) THEN
         l_raio := round (p_largura / 2);
@@ -2485,13 +2644,13 @@ AS
       END IF;
       l_svg := '<circle cx="' || l_centro('x') || '" cy="' || l_centro('y') || '" r="' || l_raio || '" fill="rgb(174,214,241)" />' || chr(13) || chr(10);
     ELSE
-      l_ponto := converter_geo_pixel (90, -180, p_largura, p_altura, p_projecao);
+      l_ponto := converter_geo_pixel (90, -180, p_largura, p_altura, l_projecao);
       l_svg := '<path d="M' || l_ponto('x') || ',' || l_ponto('y');
       l_anterior('x') := l_ponto('x');
       l_anterior('y') := l_ponto('y');
       FOR lon IN -18 .. 18 LOOP
         l_longitude := lon * 10;
-        l_ponto := converter_geo_pixel (90, l_longitude, p_largura, p_altura, p_projecao);
+        l_ponto := converter_geo_pixel (90, l_longitude, p_largura, p_altura, l_projecao);
         IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
           l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
           l_anterior('x') := l_ponto('x');
@@ -2500,7 +2659,7 @@ AS
       END LOOP;
       FOR lat IN REVERSE -45 .. 45 LOOP
         l_latitude := lat * 2;
-        l_ponto := converter_geo_pixel (l_latitude, 180, p_largura, p_altura, p_projecao);
+        l_ponto := converter_geo_pixel (l_latitude, 180, p_largura, p_altura, l_projecao);
         IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
           l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
           l_anterior('x') := l_ponto('x');
@@ -2509,7 +2668,7 @@ AS
       END LOOP;
       FOR lon IN REVERSE -18 .. 18 LOOP
         l_longitude := lon * 10;
-        l_ponto := converter_geo_pixel (-90, l_longitude, p_largura, p_altura, p_projecao);
+        l_ponto := converter_geo_pixel (-90, l_longitude, p_largura, p_altura, l_projecao);
         IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
           l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
           l_anterior('x') := l_ponto('x');
@@ -2518,7 +2677,7 @@ AS
       END LOOP;
       FOR lat IN -45 .. 45 LOOP
         l_latitude := lat * 2;
-        l_ponto := converter_geo_pixel (l_latitude, -180, p_largura, p_altura, p_projecao);
+        l_ponto := converter_geo_pixel (l_latitude, -180, p_largura, p_altura, l_projecao);
         IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
           l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
           l_anterior('x') := l_ponto('x');
@@ -2591,6 +2750,109 @@ AS
     RETURN l_svg;
     
   END exibir_fechamento_svg;
+  
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 29/10/2026
+  -- Description: Envia um CLOB de qualquer tamanho para o buffer HTP em blocos, pois htp.p e
+  --              htp.prn aceitam no máximo 32767 bytes por chamada.
+  --
+  -- Parameters:
+  --   @p_clob = Conteúdo a ser enviado
+  --
+  -- Change History:
+  --   29/10/26 Daniel Madeira: Versão inicial
+  --
+  -- =================================================================================================
+  PROCEDURE imprimir_clob (
+    p_clob IN CLOB
+  )
+  IS
+    c_bloco   CONSTANT PLS_INTEGER := 8000; -- caracteres (até 4 bytes cada em AL32UTF8)
+    l_tamanho PLS_INTEGER;
+    l_posicao PLS_INTEGER := 1;
+    
+  BEGIN
+    IF p_clob IS NULL THEN
+      RETURN;
+    END IF;
+    l_tamanho := dbms_lob.getlength (p_clob);
+    WHILE l_posicao <= l_tamanho LOOP
+      htp.prn (dbms_lob.substr (p_clob, c_bloco, l_posicao));
+      l_posicao := l_posicao + c_bloco;
+    END LOOP;
+    
+  END imprimir_clob;
+  
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 29/10/2026
+  -- Description: Constrói e envia ao buffer HTP o mapa completo em SVG (fundo, continentes,
+  --              capitais e grade).
+  --
+  -- Parameters:
+  --   @p_largura  = Tamanho horizontal da imagem do mapa em pontos
+  --   @p_altura   = Tamanho vertical da imagem do mapa em pontos
+  --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
+  --   @p_moldura  = Verdadeiro ou falso para construir um contorno na imagem
+  --
+  -- Change History:
+  --   29/10/26 Daniel Madeira: Versão inicial
+  --
+  -- =================================================================================================
+  PROCEDURE exibir_mapa (
+    p_largura  IN NUMBER   DEFAULT 800
+  , p_altura   IN NUMBER   DEFAULT 400
+  , p_projecao IN VARCHAR2 DEFAULT 'c'
+  , p_moldura  IN BOOLEAN  DEFAULT false
+  )
+  IS
+    TYPE continentes_t IS TABLE OF VARCHAR2(30);
+    l_continentes continentes_t := continentes_t ( 'North America'
+                                                 , 'Oceania'
+                                                 , 'Seven seas (open ocean)'
+                                                 , 'Antarctica'
+                                                 , 'South America'
+                                                 , 'Europe'
+                                                 , 'Africa'
+                                                 , 'Asia'
+                                                 );
+    l_largura  NUMBER      := nvl(p_largura, 800);
+    l_altura   NUMBER      := nvl(p_altura, 400);
+    l_projecao VARCHAR2(1) := normalizar_projecao (p_projecao);
+    l_clob     CLOB;
+    
+    PROCEDURE imprimir_e_liberar (
+      p_conteudo IN OUT NOCOPY CLOB
+    )
+    IS
+    BEGIN
+      imprimir_clob (p_conteudo);
+      IF dbms_lob.istemporary (p_conteudo) = 1 THEN
+        dbms_lob.freetemporary (p_conteudo);
+      END IF;
+    END imprimir_e_liberar;
+    
+  BEGIN
+    htp.prn (exibir_abertura_svg (l_largura, l_altura, l_projecao, nvl(p_moldura, false)));
+    
+    l_clob := exibir_fundo_azul (l_largura, l_altura, l_projecao);
+    imprimir_e_liberar (l_clob);
+    
+    FOR i IN 1 .. l_continentes.count LOOP
+      l_clob := exibir_continente (l_continentes(i), l_largura, l_altura, l_projecao);
+      imprimir_e_liberar (l_clob);
+    END LOOP;
+    
+    l_clob := exibir_cidades (l_largura, l_altura, l_projecao);
+    imprimir_e_liberar (l_clob);
+    
+    l_clob := exibir_grade (l_largura, l_altura, l_projecao);
+    imprimir_e_liberar (l_clob);
+    
+    htp.prn (exibir_fechamento_svg);
+    
+  END exibir_mapa;
   
 END world_map_projections;
 /
