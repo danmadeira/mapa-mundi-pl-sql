@@ -15,6 +15,7 @@ Esta *package* em PL/SQL foi desenvolvida de uma forma simples para facilitar o 
 - Equal Earth;
 - Equidistante;
 - Gott equal-area elliptical;
+- Gott–Mugnolo azimuthal;
 - Hammer;
 - Kavrayskiy VII;
 - Lambert azimuthal equal-area;
@@ -33,21 +34,77 @@ Esta *package* em PL/SQL foi desenvolvida de uma forma simples para facilitar o 
 
 Para elaborar um mapa é necessário determinar um método no qual cada ponto na superfície terrestre corresponda a um ponto no plano e vice-versa. Existem diversos métodos e estes métodos são chamados sistemas de projeções. Um sistema de projeção adota um modelo matemático do planeta e relaciona os pontos estabelecendo uma escala e um sistema de coordenadas.
 
-O sistema de coordenadas geográficas expressa a posição de um ponto na superfície esférica do globo terrestre. O globo é dividido em latitudes que vão de 0 a 90 graus, a partir da linha do Equador, separando os hemisférios Norte e Sul, e longitudes que vão de 0 a 180 graus, a partir do meridiano de Greenwich, separando os hemisférios Leste e Oeste. A latitude e a longitude, na notação decimal, é indicada com valor negativo quando é uma latitude Sul ou uma longitude Oeste.
+O sistema de coordenadas geográficas expressa a posição de um ponto na superfície do globo terrestre. O globo é dividido em latitudes que vão de 0 a 90 graus, a partir da linha do Equador, separando os hemisférios Norte e Sul, e longitudes que vão de 0 a 180 graus, a partir do meridiano de Greenwich, separando os hemisférios Leste e Oeste. A latitude e a longitude, na notação decimal, são indicadas com valor negativo quando representam uma latitude Sul ou uma longitude Oeste. Enquanto a maioria das projeções desta *package* adota o modelo esférico da Terra, a projeção *Equal Earth* considera o modelo elipsoidal (WGS84), convertendo previamente a latitude geográfica em **latitude autálica** (latitude equivalente em uma esfera de mesma área superficial) para compensar o achatamento polar do planeta.
 
-O sistema de coordenadas cartesiano serve para especificar pontos num determinado espaço plano. Tem uma semelhança com o sistema de coordenadas geográficas pois a origem, a coordenada (0,0), está no centro. No entanto, em computação gráfica, as imagens possuem um sistema de coordenadas de pixel, onde a origem está no canto superior esquerdo. Em uma imagem, as coordenadas sempre possuem valores positivos, que totalizam na largura e na altura da imagem.
+O sistema de coordenadas cartesiano serve para especificar pontos num determinado espaço plano. Tem uma semelhança com o sistema de coordenadas geográficas pois a origem, a coordenada `(0,0)`, está no centro. No entanto, em computação gráfica e no formato SVG, as imagens possuem um sistema de coordenadas de pixel cuja origem `(0,0)` está no canto superior esquerdo, com o eixo horizontal (`x`) crescendo para a direita e o eixo vertical (`y`) crescendo para baixo, assumindo apenas valores positivos limitados pela largura e pela altura da imagem.
 
-Para adaptar um sistema de coordenadas, onde é possível valores negativos, em um sistema que só adote valores positivos, usa-se um falso leste e um falso norte. São valores lineares que são acrescidos na equação para que, respectivamente, as coordenadas (x,y) não fiquem com os valores negativos. Trata-se de um deslocamento do ponto para compensar a diferença na coordenada. Nesta *package*, o falso leste e o falso norte estão implementados pelas coordenadas do centro da imagem.
+Para adaptar o sistema cartesiano (que admite valores negativos e tem o eixo vertical orientado para cima) ao sistema de pixels da imagem, utilizam-se um falso leste e um falso norte implementados pelas coordenadas do centro da imagem $(\text{centro}_x, \text{centro}_y)$. Na conversão final, o deslocamento horizontal projetado é somado ao centro ($\text{centro}_x + x \cdot \text{módulo}$), o deslocamento vertical é subtraído do centro para inverter a orientação do eixo $y$ ($\text{centro}_y - y \cdot \text{módulo}$), e ambos os valores são arredondados para o inteiro mais próximo por meio de `round`, evitando desvios sistemáticos de truncamento.
 
-E ainda, para regular as proporções entre os sistemas de coordenadas, esta *package* adota uma unidade de medida, na forma de um módulo, que é calculado dependendo da razão entre a largura e a altura da imagem. Esta razão da imagem é comparada com a razão nativa do respectivo sistema de projeção, razão dada entre a linha do Equador e o meridiano principal, para escolher se o módulo será baseado na largura/paralelo ou na altura/meridiano.
+Para regular as proporções entre os sistemas de coordenadas e eliminar espaços vazios excedentes ao redor do mapa, a *package* calcula dinamicamente os limites cartesianos máximos exatos de cada projeção: o semieixo horizontal máximo $x_{\max}$ (no Equador, $\text{longitude} = 180^\circ$) e o semieixo vertical máximo $y_{\max}$ (no Polo Norte, $\text{latitude} = 90^\circ$). A partir das dimensões máximas solicitadas pelo usuário, obtêm-se os fatores de escala candidatos $\text{módulo}_x = \frac{\text{largura}}{2 \cdot x_{\max}}$ e $\text{módulo}_y = \frac{\text{altura}}{2 \cdot y_{\max}}$. A *package* adota o menor módulo para garantir que toda a projeção caiba nos limites informados e, em seguida, recalcula a dimensão excedente ($\text{largura útil} = \text{round}(2 \cdot x_{\max} \cdot \text{módulo}_y)$ ou $\text{altura útil} = \text{round}(2 \cdot y_{\max} \cdot \text{módulo}_x)$), fazendo com que a imagem SVG final tenha exatamente a dimensão útil da projeção escolhida.
 
-Tudo na imagem é construído de acordo com a projeção escolhida e proporcionalmente à dimensão da imagem. Esta *package* constrói os polígonos dos países, que juntos formam os continentes, as linhas imaginárias dos paralelos e meridianos, o fundo azul dentro dos limites da projeção etc.
+Tudo na imagem é construído de acordo com a projeção escolhida e proporcionalmente à área útil da imagem. Esta *package* constrói os polígonos dos países, que juntos formam os continentes, as linhas imaginárias dos paralelos, meridianos, trópicos e círculos polares, os pontos das cidades capitais e o fundo azul dentro dos limites da projeção.
 
 ### O mapa executado no Oracle APEX
 
 ![Mapa-múndi](img/mapamundi.png?raw=true)
 
 <p align="center">projeção Natural Earth II</p>
+
+### Estrutura e funcionamento da package
+
+A *package* `world_map_projections` ([`sql/world_map_projections.sql`](sql/world_map_projections.sql)) está estruturada em cinco camadas internas que trabalham em conjunto para transformar os dados geográficos armazenados no banco de dados Oracle em um documento SVG completo:
+
+#### 1. Acumulador de texto SVG em memória (`svg_t`)
+Como um mapa-múndi completo em alta resolução ultrapassa facilmente o limite de `32.767` bytes do tipo `VARCHAR2` no PL/SQL, a *package* utiliza um registro acumulador interno (`svg_t`) composto por um buffer `VARCHAR2(32767 BYTE)` e um `CLOB` temporário:
+- `svg_iniciar`: aloca um `CLOB` temporário com duração de chamada (`dbms_lob.call`).
+- `svg_anexar`: concatena trechos de SVG no buffer em memória rápida (`VARCHAR2`) e só descarrega no `CLOB` (`svg_descarregar`) quando o buffer se aproxima do limite de `32.767` bytes, evitando o custo de I/O de concatenar no `CLOB` a cada coordenada.
+- `svg_finalizar`: descarrega o conteúdo remanescente do buffer e retorna o `CLOB` final.
+
+#### 2. Núcleo matemático e sistemas de projeção
+Cada projeção possui subprogramas específicos para transformar coordenadas geográficas $(\phi, \lambda)$ em coordenadas cartesianas planas $(x, y)$:
+- **Conversão autálica (`converter_geografica_para_autalica`)**: converte a latitude geodésica (elipsoide WGS84) em latitude autálica (esfera de mesma área superficial) para uso na projeção *Equal Earth*.
+- **Equações paramétricas e iterativas**: projeções como *Eckert IV* (`e`), *Eckert VI* (`E`), *Mollweide* (`M`) e *Gott equal-area elliptical* (`g`) resolvem equações transcendentais pelo método numérico de Newton-Raphson (até 10 iterações com tolerância de $10^{-7}$ e proteção contra derivada nula nos polos).
+- **Cálculo acoplado de $(x, y)$**: projeções cujas fórmulas de $x$ e $y$ compartilham termos intermediários ou iterações (*Gott elíptica*, *Gott–Mugnolo azimutal*, *Hammer*, *Lambert azimutal*, *Winkel Tripel* e *Equal Earth*) dispõem de procedimentos unificados que calculam ambas as coordenadas simultaneamente, evitando retrabalho trigonométrico.
+- **Códigos identificadores (`p_projecao`)**:
+
+| Código | Projeção | Tipo / Propriedade principal |
+| :---: | :--- | :--- |
+| `c` | Plate Carrée (Equidistante Cilíndrica) | Cilíndrica equidistante (padrão) |
+| `e` | Eckert IV | Pseudocilíndrica equivalente (igual área) |
+| `E` | Eckert VI | Pseudocilíndrica equivalente (igual área) |
+| `g` | Gott Equal-Area Elliptical | Elíptica equivalente (igual área) |
+| `G` | Gott–Mugnolo Azimuthal | Azimutal equatorial |
+| `h` | Hammer | Azimutal modificada equivalente |
+| `i` | Equal Earth | Pseudocilíndrica equivalente (com latitude autálica) |
+| `k` | Kavrayskiy VII | Pseudocilíndrica de compromisso |
+| `l` | Lambert Azimuthal Equal-Area | Azimutal equatorial equivalente |
+| `m` | Miller Cylindrical | Cilíndrica modificada |
+| `M` | Mollweide | Pseudocilíndrica equivalente (igual área) |
+| `n` | Natural Earth | Pseudocilíndrica de compromisso |
+| `N` | Natural Earth II | Pseudocilíndrica de compromisso |
+| `p` | Patterson | Cilíndrica de compromisso |
+| `r` | Robinson | Pseudocilíndrica de compromisso |
+| `s` | Sinusoidal | Pseudocilíndrica equivalente (igual área) |
+| `t` | Mercator | Cilíndrica conforme |
+| `w` | Wagner VI | Pseudocilíndrica de compromisso |
+| `W` | Winkel Tripel (Winkel III) | Azimutal modificada de compromisso |
+
+#### 3. Ajuste da área útil e conversão para pixels
+- `obter_limites_projecao`: calcula os limites cartesianos máximos da projeção — $x_{\max}$ no Equador ($\text{lon} = 180^\circ$) e $y_{\max}$ no Polo Norte ($\text{lat} = 90^\circ$) — e os mantém em cache de pacote (`g_ultima_projecao`, `g_cache_x_max`, `g_cache_y_max`) para evitar recálculos a cada ponto.
+- `ajustar_dimensoes_uteis`: a partir das dimensões máximas solicitadas (`p_largura` e `p_altura`), calcula os módulos horizontal e vertical e reduz a dimensão excedente para que o elemento `<svg>` tenha exatamente o tamanho ocupado pela projeção, sem faixas vazias ao redor do mapa.
+- `converter_geo_pixel`: obtém o ponto projetado $(x, y)$, aplica o fator de escala (`l_modulo`) determinado pelos limites da projeção e soma o deslocamento do centro da imagem (`coordenar_centro`), arredondando o resultado final com `round`.
+
+#### 4. Construção das camadas vetoriais do mapa
+Cada camada do mapa pode ser gerada individualmente ou de forma integrada:
+- **Estrutura raiz (`exibir_abertura_svg` e `exibir_fechamento_svg`)**: abre a tag `<svg>` com `width` e `height` já ajustados à área útil da projeção (incluindo opcionalmente um `<rect>` de moldura quando `p_moldura = true`) e encerra com `</svg>`.
+- **Oceano (`exibir_fundo_azul`)**: desenha a silhueta da superfície terrestre preenchida em azul — usando `<circle>` nas projeções azimutais (`l` e `G`) ou `<path>` percorrendo o perímetro polar e os meridianos extremos ($\pm 180^\circ$ e $\pm 90^\circ$) a cada $2^\circ$ nas demais projeções.
+- **Continentes (`exibir_continente`, `extrair_poligono` e `carregar_arquivo_json`)**: carrega o arquivo GeoJSON armazenado em `BLOB` na tabela `repositorio`, filtra as feições pelo continente (`CONTINENT`), percorre anéis de geometrias `Polygon` e `MultiPolygon`, valida se $(\text{lat}, \text{lon}) \in [-90, 90] \times [-180, 180]$ e gera elementos `<polygon>`, omitindo vértices consecutivos que resultem no mesmo pixel.
+- **Cidades capitais (`exibir_cidades`)**: consulta as capitais (`capital = 'primary'`) na tabela `worldcities`, ordenadas por população, e renderiza elementos `<circle>` com `<title>` informativo e raio customizado (`p_raio`) ou proporcional à largura útil da imagem (`round(largura * 0.003)`, com mínimo de `1` pixel).
+- **Grade cartográfica (`exibir_grade`)**: reúne os paralelos de $15^\circ$ a $75^\circ$ N/S (`exibir_paralelos`), os meridianos a cada $15^\circ$ (`exibir_meridianos`, com descontinuidade tratada no antípoda $(0^\circ, \pm 180^\circ)$ das projeções azimutais), os trópicos de Câncer/Capricórnio e círculos polares tracejados (`exibir_circulos`), a linha do Equador (`exibir_equador`) e o meridiano de Greenwich (`exibir_greenwich`). Paralelos curvos são amostrados a cada $2^\circ$ (`<path>`), enquanto paralelos retos utilizam `<line>`.
+
+#### 5. Renderização e envio ao Oracle APEX (`exibir_mapa` e `imprimir_clob`)
+- `imprimir_clob`: fatia qualquer `CLOB` em blocos de `8.000` caracteres (seguros para codificação multibyte `AL32UTF8` dentro do limite de `32.767` bytes do `htp.prn`) e os envia sequencialmente ao buffer HTTP.
+- `exibir_mapa`: procedimento de alto nível utilizado em regiões de conteúdo dinâmico do Oracle APEX. Ajusta as dimensões úteis uma única vez e emite em sequência a abertura do SVG, o fundo azul, os oito grupos continentais, as cidades capitais, a grade cartográfica e o fechamento do SVG, liberando os `CLOB`s temporários ao término de cada camada.
 
 ### Referências
 

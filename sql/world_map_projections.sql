@@ -11,6 +11,8 @@ CREATE OR REPLACE PACKAGE world_map_projections
 --   06/09/26 Daniel Madeira: Projeção Equal Earth
 --   29/10/26 Daniel Madeira: Retornos em CLOB (evita ORA-06502 em imagens grandes),
 --                            procedimentos imprimir_clob e exibir_mapa
+--   02/11/26 Daniel Madeira: Alinhamento matemático com a versão em C (constante PI, proteções
+--                            numéricas, tratamento de antípodas, limites de escala e round)
 --   
 -- =================================================================================================
 AS
@@ -44,6 +46,7 @@ AS
     p_largura  IN NUMBER   DEFAULT 800
   , p_altura   IN NUMBER   DEFAULT 400
   , p_projecao IN VARCHAR2 DEFAULT 'c'
+  , p_raio     IN NUMBER   DEFAULT NULL
   )
   RETURN CLOB;
   
@@ -63,6 +66,7 @@ AS
   , p_altura   IN NUMBER   DEFAULT 400
   , p_projecao IN VARCHAR2 DEFAULT 'c'
   , p_moldura  IN BOOLEAN  DEFAULT false
+  , p_raio     IN NUMBER   DEFAULT NULL
   );
   
 END world_map_projections;
@@ -71,6 +75,12 @@ END world_map_projections;
 
 CREATE OR REPLACE PACKAGE BODY world_map_projections
 AS
+
+  c_pi CONSTANT NUMBER := 3.14159265358979323846;
+
+  g_ultima_projecao VARCHAR2(1) := NULL;
+  g_cache_x_max     NUMBER      := 0;
+  g_cache_y_max     NUMBER      := 0;
 
   TYPE coordenadas_xy_t IS TABLE OF NUMBER INDEX BY VARCHAR2(1);
 
@@ -249,6 +259,7 @@ AS
   --
   -- Change History:
   --   06/09/26 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Proteção de intervalo [-1, 1] para asin(l_q / l_qp)
   --
   -- =================================================================================================
   FUNCTION converter_geografica_para_autalica (
@@ -260,6 +271,7 @@ AS
     l_latitude_autalica NUMBER;
     l_q                 NUMBER;
     l_qp                NUMBER;
+    l_ratio_q           NUMBER;
     l_e                 CONSTANT NUMBER := 0.0818191908426;
     l_e2                CONSTANT NUMBER := 0.00669437999014;
 
@@ -268,7 +280,7 @@ AS
       RETURN p_latitude;
     END IF;
 
-    l_phi := p_latitude * 3.14159265359 / 180;
+    l_phi := p_latitude * c_pi / 180;
 
     l_q := (1 - l_e2)
          * (
@@ -284,9 +296,16 @@ AS
             * ln((1 - l_e) / (1 + l_e))
             );
 
-    l_latitude_autalica := asin(l_q / l_qp);
+    l_ratio_q := l_q / l_qp;
+    IF (l_ratio_q > 1) THEN
+      l_ratio_q := 1;
+    ELSIF (l_ratio_q < -1) THEN
+      l_ratio_q := -1;
+    END IF;
 
-    RETURN (l_latitude_autalica * 180 / 3.14159265359);
+    l_latitude_autalica := asin(l_ratio_q);
+
+    RETURN (l_latitude_autalica * 180 / c_pi);
 
   END converter_geografica_para_autalica;
 
@@ -304,6 +323,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Retorno direto nos polos e proteção contra divisão por zero
   --   
   -- =================================================================================================
   FUNCTION calcular_eckert_iv_theta (
@@ -315,16 +335,26 @@ AS
     l_k     NUMBER;
     l_sint  NUMBER;
     l_cost  NUMBER;
+    l_denom NUMBER;
     l_v     NUMBER;
     
   BEGIN
-    l_theta := p_latitude * (3.14159265359 / 180);
-    l_k := (2 + (3.14159265359 / 2)) * sin(l_theta);
+    IF (abs(p_latitude) >= 90) THEN
+      IF (p_latitude >= 0) THEN
+        RETURN (c_pi / 2);
+      ELSE
+        RETURN (-c_pi / 2);
+      END IF;
+    END IF;
+    l_theta := p_latitude * (c_pi / 180);
+    l_k := (2 + (c_pi / 2)) * sin(l_theta);
     l_theta := l_theta / 2;
     FOR i IN REVERSE 1 .. 10 LOOP
       l_sint := sin(l_theta);
       l_cost := cos(l_theta);
-      l_v := (l_theta + l_sint * l_cost + 2 * l_sint - l_k) / (2 * l_cost * (1 + l_cost));
+      l_denom := 2 * l_cost * (1 + l_cost);
+      EXIT WHEN (abs(l_denom) < 1E-12);
+      l_v := (l_theta + l_sint * l_cost + 2 * l_sint - l_k) / l_denom;
       l_theta := l_theta - l_v;
       EXIT WHEN (abs(l_v) < 1E-7);
     END LOOP;
@@ -358,8 +388,8 @@ AS
     l_longitude NUMBER;
     
   BEGIN
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    RETURN ((2 / (sqrt(3.14159265359 * (4 + 3.14159265359)))) * l_longitude * (1 + cos(p_theta)));
+    l_longitude := p_longitude * (c_pi / 180);
+    RETURN ((2 / (sqrt(c_pi * (4 + c_pi)))) * l_longitude * (1 + cos(p_theta)));
     
   END calcular_eckert_iv_x;
 
@@ -385,7 +415,7 @@ AS
   RETURN NUMBER
   IS
   BEGIN
-    RETURN (2 * sqrt(3.14159265359 / (4 + 3.14159265359)) * sin(p_theta));
+    RETURN (2 * sqrt(c_pi / (4 + c_pi)) * sin(p_theta));
     
   END calcular_eckert_iv_y;
 
@@ -403,6 +433,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Proteção contra divisão por zero no denominador
   --   
   -- =================================================================================================
   FUNCTION calcular_eckert_vi_theta (
@@ -412,13 +443,16 @@ AS
   IS
     l_theta NUMBER;
     l_k     NUMBER;
+    l_denom NUMBER;
     l_v     NUMBER;
     
   BEGIN
-    l_theta := p_latitude * (3.14159265359 / 180);
-    l_k := (1 + (3.14159265359 / 2)) * sin(l_theta);
+    l_theta := p_latitude * (c_pi / 180);
+    l_k := (1 + (c_pi / 2)) * sin(l_theta);
     FOR i IN REVERSE 1 .. 10 LOOP
-      l_v := (l_theta + sin(l_theta) - l_k) / (1 + cos(l_theta));
+      l_denom := 1 + cos(l_theta);
+      EXIT WHEN (abs(l_denom) < 1E-12);
+      l_v := (l_theta + sin(l_theta) - l_k) / l_denom;
       l_theta := l_theta - l_v;
       EXIT WHEN (abs(l_v) < 1E-7);
     END LOOP;
@@ -452,8 +486,8 @@ AS
     l_longitude NUMBER;
     
   BEGIN
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    RETURN (l_longitude * (1 + cos(p_theta)) / sqrt(2 + 3.14159265359));
+    l_longitude := p_longitude * (c_pi / 180);
+    RETURN (l_longitude * (1 + cos(p_theta)) / sqrt(2 + c_pi));
     
   END calcular_eckert_vi_x;
 
@@ -479,7 +513,7 @@ AS
   RETURN NUMBER
   IS
   BEGIN
-    RETURN (2 * p_theta / sqrt(2 + 3.14159265359));
+    RETURN (2 * p_theta / sqrt(2 + c_pi));
     
   END calcular_eckert_vi_y;
 
@@ -498,6 +532,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   29/10/26 Daniel Madeira: Corrigida a detecção de não convergência na última iteração
+  --   02/11/26 Daniel Madeira: Inicialização com phi, sinal de phi na não convergência e proteções numéricas
   --   
   -- =================================================================================================
   FUNCTION calcular_gott_equal_area_elliptical_x (
@@ -507,19 +542,31 @@ AS
   RETURN NUMBER
   IS
     l_longitude NUMBER;
-    l_theta     NUMBER;
+    l_lat_rad   NUMBER;
+    l_sin_phi   NUMBER;
     l_phi       NUMBER;
+    l_theta     NUMBER;
     l_k         NUMBER;
+    l_denom     NUMBER;
     l_v         NUMBER;
     l_convergiu BOOLEAN := false;
     
   BEGIN
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    l_theta := p_latitude * (3.14159265359 / 180);
-    l_phi := asin(cos(l_theta) * sin(l_longitude / 2));
-    l_k := 3.14159265359 * sin(l_phi);
+    l_longitude := p_longitude * (c_pi / 180);
+    l_lat_rad := p_latitude * (c_pi / 180);
+    l_sin_phi := cos(l_lat_rad) * sin(l_longitude / 2);
+    IF (l_sin_phi > 1) THEN
+      l_sin_phi := 1;
+    ELSIF (l_sin_phi < -1) THEN
+      l_sin_phi := -1;
+    END IF;
+    l_phi := asin(l_sin_phi);
+    l_theta := l_phi;
+    l_k := c_pi * l_sin_phi;
     FOR i IN 1 .. 10 LOOP
-      l_v := (l_theta + sin(l_theta) - l_k) / (1 + cos(l_theta));
+      l_denom := 1 + cos(l_theta);
+      EXIT WHEN (abs(l_denom) < 1E-12);
+      l_v := (l_theta + sin(l_theta) - l_k) / l_denom;
       l_theta := l_theta - l_v;
       IF (abs(l_v) < 1E-7) THEN
         l_convergiu := true;
@@ -527,10 +574,10 @@ AS
       END IF;
     END LOOP;
     IF NOT l_convergiu THEN
-      IF (l_theta < 0) THEN
-        l_theta := (-3.14159265359 / 2);
+      IF (l_phi < 0) THEN
+        l_theta := (-c_pi / 2);
       ELSE
-        l_theta := (3.14159265359 / 2);
+        l_theta := (c_pi / 2);
       END IF;
     ELSE
       l_theta := l_theta * 0.5;
@@ -554,6 +601,8 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   29/10/26 Daniel Madeira: Corrigida a detecção de não convergência na última iteração
+  --   02/11/26 Daniel Madeira: Tratamento exato de cos(phi) = 0 (sem remendo de +-180),
+  --                            inicialização com phi e sinal de phi na não convergência
   --   
   -- =================================================================================================
   FUNCTION calcular_gott_equal_area_elliptical_y (
@@ -563,28 +612,46 @@ AS
   RETURN NUMBER
   IS
     l_longitude NUMBER;
-    l_theta     NUMBER;
+    l_lat_rad   NUMBER;
+    l_sin_phi   NUMBER;
     l_phi       NUMBER;
-    l_k         NUMBER;
+    l_cos_phi   NUMBER;
+    l_ratio_s   NUMBER;
     l_lambda    NUMBER;
+    l_theta     NUMBER;
+    l_k         NUMBER;
+    l_denom     NUMBER;
     l_v         NUMBER;
     l_convergiu BOOLEAN := false;
     
   BEGIN
-    IF (p_longitude = 180) THEN -- remendo para limitar em 179
-      l_longitude := p_longitude - 1;
-    ELSIF (p_longitude = -180) THEN
-      l_longitude := p_longitude + 1;
-    ELSE
-      l_longitude := p_longitude;
+    l_longitude := p_longitude * (c_pi / 180);
+    l_lat_rad := p_latitude * (c_pi / 180);
+    l_sin_phi := cos(l_lat_rad) * sin(l_longitude / 2);
+    IF (l_sin_phi > 1) THEN
+      l_sin_phi := 1;
+    ELSIF (l_sin_phi < -1) THEN
+      l_sin_phi := -1;
     END IF;
-    l_longitude := l_longitude * (3.14159265359 / 180);
-    l_theta := p_latitude * (3.14159265359 / 180);
-    l_phi := asin(cos(l_theta) * sin(l_longitude / 2));
-    l_k := 3.14159265359 * sin(l_phi);
-    l_lambda := 0.5 * asin(sin(l_theta) / cos(l_phi));
+    l_phi := asin(l_sin_phi);
+    l_cos_phi := cos(l_phi);
+    IF (abs(l_cos_phi) < 1E-12) THEN
+      l_lambda := 0;
+    ELSE
+      l_ratio_s := sin(l_lat_rad) / l_cos_phi;
+      IF (l_ratio_s > 1) THEN
+        l_ratio_s := 1;
+      ELSIF (l_ratio_s < -1) THEN
+        l_ratio_s := -1;
+      END IF;
+      l_lambda := 0.5 * asin(l_ratio_s);
+    END IF;
+    l_theta := l_phi;
+    l_k := c_pi * l_sin_phi;
     FOR i IN 1 .. 10 LOOP
-      l_v := (l_theta + sin(l_theta) - l_k) / (1 + cos(l_theta));
+      l_denom := 1 + cos(l_theta);
+      EXIT WHEN (abs(l_denom) < 1E-12);
+      l_v := (l_theta + sin(l_theta) - l_k) / l_denom;
       l_theta := l_theta - l_v;
       IF (abs(l_v) < 1E-7) THEN
         l_convergiu := true;
@@ -592,17 +659,102 @@ AS
       END IF;
     END LOOP;
     IF NOT l_convergiu THEN
-      IF (l_theta < 0) THEN
-        l_theta := (-3.14159265359 / 2);
+      IF (l_phi < 0) THEN
+        l_theta := (-c_pi / 2);
       ELSE
-        l_theta := (3.14159265359 / 2);
+        l_theta := (c_pi / 2);
       END IF;
     ELSE
       l_theta := l_theta * 0.5;
     END IF;
-    RETURN ((3.14159265359 / (2 * sqrt(2))) * l_lambda * cos(l_theta));
+    RETURN ((c_pi / (2 * sqrt(2))) * l_lambda * cos(l_theta));
     
   END calcular_gott_equal_area_elliptical_y;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 02/11/2026
+  -- Description: Calcula simultaneamente as coordenadas cartesianas X e Y da projeção elíptica de
+  --              igual área de Gott, executando o método de Newton-Raphson apenas uma vez por ponto.
+  --              * GOTT, J. R.; MUGNOLO, C.; COLLEY, W. N. Map Projections Minimizing Distance Errors. p 4
+  --
+  -- Parameters:
+  --   @p_latitude  = Coordenada geográfica da distância ao Equador em graus em notação decimal
+  --   @p_longitude = Coordenada geográfica da distância ao meridiano de Greenwich em graus em notação decimal
+  --   @p_x         = Coordenada X no plano cartesiano (saída)
+  --   @p_y         = Coordenada Y no plano cartesiano (saída)
+  --
+  -- Change History:
+  --   02/11/26 Daniel Madeira: Versão inicial (alinhada com calcular_gott_eliptica em C)
+  --
+  -- =================================================================================================
+  PROCEDURE calcular_gott_equal_area_elliptical (
+    p_latitude  IN  NUMBER
+  , p_longitude IN  NUMBER
+  , p_x         OUT NUMBER
+  , p_y         OUT NUMBER
+  )
+  IS
+    l_longitude NUMBER;
+    l_lat_rad   NUMBER;
+    l_sin_phi   NUMBER;
+    l_phi       NUMBER;
+    l_cos_phi   NUMBER;
+    l_ratio_s   NUMBER;
+    l_lambda    NUMBER;
+    l_theta     NUMBER;
+    l_k         NUMBER;
+    l_denom     NUMBER;
+    l_v         NUMBER;
+    l_convergiu BOOLEAN := false;
+
+  BEGIN
+    l_longitude := p_longitude * (c_pi / 180);
+    l_lat_rad := p_latitude * (c_pi / 180);
+    l_sin_phi := cos(l_lat_rad) * sin(l_longitude / 2);
+    IF (l_sin_phi > 1) THEN
+      l_sin_phi := 1;
+    ELSIF (l_sin_phi < -1) THEN
+      l_sin_phi := -1;
+    END IF;
+    l_phi := asin(l_sin_phi);
+    l_cos_phi := cos(l_phi);
+    IF (abs(l_cos_phi) < 1E-12) THEN
+      l_lambda := 0;
+    ELSE
+      l_ratio_s := sin(l_lat_rad) / l_cos_phi;
+      IF (l_ratio_s > 1) THEN
+        l_ratio_s := 1;
+      ELSIF (l_ratio_s < -1) THEN
+        l_ratio_s := -1;
+      END IF;
+      l_lambda := 0.5 * asin(l_ratio_s);
+    END IF;
+    l_theta := l_phi;
+    l_k := c_pi * l_sin_phi;
+    FOR i IN 1 .. 10 LOOP
+      l_denom := 1 + cos(l_theta);
+      EXIT WHEN (abs(l_denom) < 1E-12);
+      l_v := (l_theta + sin(l_theta) - l_k) / l_denom;
+      l_theta := l_theta - l_v;
+      IF (abs(l_v) < 1E-7) THEN
+        l_convergiu := true;
+        EXIT;
+      END IF;
+    END LOOP;
+    IF NOT l_convergiu THEN
+      IF (l_phi < 0) THEN
+        l_theta := (-c_pi / 2);
+      ELSE
+        l_theta := (c_pi / 2);
+      END IF;
+    ELSE
+      l_theta := l_theta * 0.5;
+    END IF;
+    p_x := sqrt(2) * sin(l_theta);
+    p_y := (c_pi / (2 * sqrt(2))) * l_lambda * cos(l_theta);
+
+  END calcular_gott_equal_area_elliptical;
 
   -- =================================================================================================
   -- Author:      Daniel Madeira
@@ -619,6 +771,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial (necessita ajuste pois está centrada no Polo Norte)
   --   20/09/26 Daniel Madeira: Projeção centralizada no Equador (Lat 0, Lon 0)
+  --   02/11/26 Daniel Madeira: Tratamento explícito do antípoda (0, +-180) e proteção de acos
   --   
   -- =================================================================================================
   FUNCTION calcular_gott_mugnolo_azimuthal_x (
@@ -629,14 +782,29 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_prod      NUMBER;
     l_c         NUMBER;
     l_k         NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
+    IF (abs(p_latitude) < 1E-12 AND abs(abs(p_longitude) - 180) < 1E-9) THEN
+      IF (p_longitude >= 0) THEN
+        RETURN sin(0.446 * c_pi);
+      ELSE
+        RETURN -sin(0.446 * c_pi);
+      END IF;
+    END IF;
 
-    l_c := acos(cos(l_latitude) * cos(l_longitude));
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+
+    l_prod := cos(l_latitude) * cos(l_longitude);
+    IF (l_prod > 1) THEN
+      l_prod := 1;
+    ELSIF (l_prod < -1) THEN
+      l_prod := -1;
+    END IF;
+    l_c := acos(l_prod);
 
     IF (l_c < 1E-10) THEN
       RETURN 0;
@@ -667,6 +835,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial (necessita ajuste pois está centrada no Polo Norte)
   --   20/09/26 Daniel Madeira: Projeção centralizada no Equador (Lat 0, Lon 0)
+  --   02/11/26 Daniel Madeira: Tratamento explícito do antípoda (0, +-180) e proteção de acos
   --   
   -- =================================================================================================
   FUNCTION calcular_gott_mugnolo_azimuthal_y (
@@ -677,14 +846,25 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_prod      NUMBER;
     l_c         NUMBER;
     l_k         NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
+    IF (abs(p_latitude) < 1E-12 AND abs(abs(p_longitude) - 180) < 1E-9) THEN
+      RETURN 0;
+    END IF;
 
-    l_c := acos(cos(l_latitude) * cos(l_longitude));
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+
+    l_prod := cos(l_latitude) * cos(l_longitude);
+    IF (l_prod > 1) THEN
+      l_prod := 1;
+    ELSIF (l_prod < -1) THEN
+      l_prod := -1;
+    END IF;
+    l_c := acos(l_prod);
 
     IF (l_c < 1E-10) THEN
       RETURN 0;
@@ -702,6 +882,74 @@ AS
 
   -- =================================================================================================
   -- Author:      Daniel Madeira
+  -- Create date: 02/11/2026
+  -- Description: Calcula simultaneamente as coordenadas cartesianas X e Y da projeção azimutal de
+  --              Gott-Mugnolo, compartilhando a distância angular c e o fator k.
+  --              * GOTT, J. R.; MUGNOLO, C.; COLLEY, W. N. Map Projections Minimizing Distance Errors. p 8
+  --
+  -- Parameters:
+  --   @p_latitude  = Coordenada geográfica da distância ao Equador em graus em notação decimal
+  --   @p_longitude = Coordenada geográfica da distância ao meridiano de Greenwich em graus em notação decimal
+  --   @p_x         = Coordenada X no plano cartesiano (saída)
+  --   @p_y         = Coordenada Y no plano cartesiano (saída)
+  --
+  -- Change History:
+  --   02/11/26 Daniel Madeira: Versão inicial (alinhada com calcular_gott_azimutal em C)
+  --
+  -- =================================================================================================
+  PROCEDURE calcular_gott_mugnolo_azimuthal (
+    p_latitude  IN  NUMBER
+  , p_longitude IN  NUMBER
+  , p_x         OUT NUMBER
+  , p_y         OUT NUMBER
+  )
+  IS
+    l_latitude  NUMBER;
+    l_longitude NUMBER;
+    l_prod      NUMBER;
+    l_c         NUMBER;
+    l_k         NUMBER;
+
+  BEGIN
+    IF (abs(p_latitude) < 1E-12 AND abs(abs(p_longitude) - 180) < 1E-9) THEN
+      IF (p_longitude >= 0) THEN
+        p_x := sin(0.446 * c_pi);
+      ELSE
+        p_x := -sin(0.446 * c_pi);
+      END IF;
+      p_y := 0;
+      RETURN;
+    END IF;
+
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+
+    l_prod := cos(l_latitude) * cos(l_longitude);
+    IF (l_prod > 1) THEN
+      l_prod := 1;
+    ELSIF (l_prod < -1) THEN
+      l_prod := -1;
+    END IF;
+    l_c := acos(l_prod);
+
+    IF (l_c < 1E-10) THEN
+      p_x := 0;
+      p_y := 0;
+    ELSE
+      IF (abs(sin(l_c)) < 1E-10) THEN
+        l_k := sin(0.446 * l_c) / 1E-10;
+      ELSE
+        l_k := sin(0.446 * l_c) / sin(l_c);
+      END IF;
+
+      p_x := l_k * cos(l_latitude) * sin(l_longitude);
+      p_y := l_k * sin(l_latitude);
+    END IF;
+
+  END calcular_gott_mugnolo_azimuthal;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
   -- Create date: 15/01/2022
   -- Description: Calcula a coordenada cartesiana X referente a projeção da longitude.
   --              * BUGAYEVSKIY, L. M.; SNYDER, J. P. *Map Projections A Reference Manual. p 176
@@ -716,6 +964,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Proteção do radicando para evitar divisão por zero
   --   
   -- =================================================================================================
   FUNCTION calcular_hammer_x (
@@ -726,12 +975,17 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_radicando NUMBER;
     l_eta       NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    l_eta := sqrt(1 + cos(l_latitude) * cos(l_longitude / 2));
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    l_radicando := 1 + cos(l_latitude) * cos(l_longitude / 2);
+    IF (l_radicando < 1E-12) THEN
+      l_radicando := 1E-12;
+    END IF;
+    l_eta := sqrt(l_radicando);
     RETURN ((2 * sqrt(2) * cos(l_latitude) * sin(l_longitude / 2)) / l_eta);
     
   END calcular_hammer_x;
@@ -752,6 +1006,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Proteção do radicando para evitar divisão por zero
   --   
   -- =================================================================================================
   FUNCTION calcular_hammer_y (
@@ -762,15 +1017,64 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_radicando NUMBER;
     l_eta       NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    l_eta := sqrt(1 + cos(l_latitude) * cos(l_longitude / 2));
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    l_radicando := 1 + cos(l_latitude) * cos(l_longitude / 2);
+    IF (l_radicando < 1E-12) THEN
+      l_radicando := 1E-12;
+    END IF;
+    l_eta := sqrt(l_radicando);
     RETURN ((sqrt(2) * sin(l_latitude)) / l_eta);
     
   END calcular_hammer_y;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 02/11/2026
+  -- Description: Calcula simultaneamente as coordenadas cartesianas X e Y da projeção de Hammer,
+  --              compartilhando o denominador radical eta.
+  --              * BUGAYEVSKIY, L. M.; SNYDER, J. P. *Map Projections A Reference Manual. p 176
+  --              * JENNY, B. Adaptive Composite Map Projections. p 3
+  --              * SNYDER, J. P.; VOXLAND, P. M. An Album of Map Projections. p 232
+  --
+  -- Parameters:
+  --   @p_latitude  = Coordenada geográfica da distância ao Equador em graus em notação decimal
+  --   @p_longitude = Coordenada geográfica da distância ao meridiano de Greenwich em graus em notação decimal
+  --   @p_x         = Coordenada X no plano cartesiano (saída)
+  --   @p_y         = Coordenada Y no plano cartesiano (saída)
+  --
+  -- Change History:
+  --   02/11/26 Daniel Madeira: Versão inicial (alinhada com calcular_hammer em C)
+  --
+  -- =================================================================================================
+  PROCEDURE calcular_hammer (
+    p_latitude  IN  NUMBER
+  , p_longitude IN  NUMBER
+  , p_x         OUT NUMBER
+  , p_y         OUT NUMBER
+  )
+  IS
+    l_latitude  NUMBER;
+    l_longitude NUMBER;
+    l_radicando NUMBER;
+    l_eta       NUMBER;
+
+  BEGIN
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    l_radicando := 1 + cos(l_latitude) * cos(l_longitude / 2);
+    IF (l_radicando < 1E-12) THEN
+      l_radicando := 1E-12;
+    END IF;
+    l_eta := sqrt(l_radicando);
+    p_x := (2 * sqrt(2) * cos(l_latitude) * sin(l_longitude / 2)) / l_eta;
+    p_y := (sqrt(2) * sin(l_latitude)) / l_eta;
+
+  END calcular_hammer;
 
   -- =================================================================================================
   -- Author:      Daniel Madeira
@@ -786,6 +1090,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Proteção contra radicando negativo
   --   
   -- =================================================================================================
   FUNCTION calcular_kavrayskiy_vii_x (
@@ -796,11 +1101,16 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_radicando NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    RETURN (3 * l_longitude / 2) * sqrt(1 / 3 - power(l_latitude / 3.14159265359, 2));
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    l_radicando := 1 / 3 - power(l_latitude / c_pi, 2);
+    IF (l_radicando < 0) THEN
+      l_radicando := 0;
+    END IF;
+    RETURN (3 * l_longitude / 2) * sqrt(l_radicando);
     
   END calcular_kavrayskiy_vii_x;
 
@@ -827,7 +1137,7 @@ AS
     l_latitude NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
     RETURN l_latitude;
     
   END calcular_kavrayskiy_vii_y;
@@ -847,6 +1157,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   20/09/26 Daniel Madeira: Checagem no denominador para evitar divisão por zero (NaN) no antípoda
+  --   02/11/26 Daniel Madeira: Tratamento explícito do antípoda (0, +-180)
   --   
   -- =================================================================================================
   FUNCTION calcular_lambert_azimuthal_equal_area_x (
@@ -861,8 +1172,15 @@ AS
     l_k           NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
+    IF (abs(p_latitude) < 1E-12 AND abs(abs(p_longitude) - 180) < 1E-9) THEN
+      IF (p_longitude >= 0) THEN
+        RETURN 2;
+      ELSE
+        RETURN -2;
+      END IF;
+    END IF;
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
     l_denominador := 1 + cos(l_latitude) * cos(l_longitude);
     IF (l_denominador < 1E-10) THEN
       l_denominador := 1E-10;
@@ -887,6 +1205,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   20/09/26 Daniel Madeira: Checagem no denominador para evitar divisão por zero (NaN) no antípoda
+  --   02/11/26 Daniel Madeira: Tratamento explícito do antípoda (0, +-180)
   --   
   -- =================================================================================================
   FUNCTION calcular_lambert_azimuthal_equal_area_y (
@@ -901,8 +1220,11 @@ AS
     l_k           NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
+    IF (abs(p_latitude) < 1E-12 AND abs(abs(p_longitude) - 180) < 1E-9) THEN
+      RETURN 0;
+    END IF;
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
     l_denominador := 1 + cos(l_latitude) * cos(l_longitude);
     IF (l_denominador < 1E-10) THEN
       l_denominador := 1E-10;
@@ -911,6 +1233,57 @@ AS
     RETURN (l_k * sin(l_latitude));
     
   END calcular_lambert_azimuthal_equal_area_y;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 02/11/2026
+  -- Description: Calcula simultaneamente as coordenadas cartesianas X e Y da projeção azimutal de
+  --              igual área de Lambert, compartilhando o fator k.
+  --              * SNYDER, J. P. Map Projections - A Working Manual. p 185
+  --
+  -- Parameters:
+  --   @p_latitude  = Coordenada geográfica da distância ao Equador em graus em notação decimal
+  --   @p_longitude = Coordenada geográfica da distância ao meridiano de Greenwich em graus em notação decimal
+  --   @p_x         = Coordenada X no plano cartesiano (saída)
+  --   @p_y         = Coordenada Y no plano cartesiano (saída)
+  --
+  -- Change History:
+  --   02/11/26 Daniel Madeira: Versão inicial (alinhada com calcular_lambert_azimutal em C)
+  --
+  -- =================================================================================================
+  PROCEDURE calcular_lambert_azimuthal_equal_area (
+    p_latitude  IN  NUMBER
+  , p_longitude IN  NUMBER
+  , p_x         OUT NUMBER
+  , p_y         OUT NUMBER
+  )
+  IS
+    l_latitude    NUMBER;
+    l_longitude   NUMBER;
+    l_denominador NUMBER;
+    l_k           NUMBER;
+
+  BEGIN
+    IF (abs(p_latitude) < 1E-12 AND abs(abs(p_longitude) - 180) < 1E-9) THEN
+      IF (p_longitude >= 0) THEN
+        p_x := 2;
+      ELSE
+        p_x := -2;
+      END IF;
+      p_y := 0;
+      RETURN;
+    END IF;
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    l_denominador := 1 + cos(l_latitude) * cos(l_longitude);
+    IF (l_denominador < 1E-10) THEN
+      l_denominador := 1E-10;
+    END IF;
+    l_k := sqrt(2 / l_denominador);
+    p_x := l_k * cos(l_latitude) * sin(l_longitude);
+    p_y := l_k * sin(l_latitude);
+
+  END calcular_lambert_azimuthal_equal_area;
 
   -- =================================================================================================
   -- Author:      Daniel Madeira
@@ -939,7 +1312,7 @@ AS
     l_longitude NUMBER;
     
   BEGIN
-    l_longitude := p_longitude * (3.14159265359 / 180);
+    l_longitude := p_longitude * (c_pi / 180);
     RETURN l_longitude;
     
   END calcular_mercator_x;
@@ -971,14 +1344,14 @@ AS
     l_latitude NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
     
     IF (l_latitude > 1.4844222297453322) THEN
-      RETURN 3.14159265359;
+      RETURN c_pi;
     ELSIF (l_latitude < -1.4844222297453322) THEN
-      RETURN -3.14159265359;
+      RETURN -c_pi;
     ELSE
-      RETURN (ln(tan(3.14159265359/4 + l_latitude/2)));
+      RETURN (ln(tan(c_pi/4 + l_latitude/2)));
     END IF;
     
   END calcular_mercator_y;
@@ -1006,7 +1379,7 @@ AS
     l_longitude NUMBER;
     
   BEGIN
-    l_longitude := p_longitude * (3.14159265359 / 180);
+    l_longitude := p_longitude * (c_pi / 180);
     RETURN l_longitude;
     
   END calcular_miller_x;
@@ -1034,8 +1407,8 @@ AS
     l_latitude NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    RETURN ((5/4) * ln(tan(3.14159265359/4 + ((2 * l_latitude)/5))));
+    l_latitude := p_latitude * (c_pi / 180);
+    RETURN ((5/4) * ln(tan(c_pi/4 + ((2 * l_latitude)/5))));
     
   END calcular_miller_y;
 
@@ -1055,6 +1428,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   29/10/26 Daniel Madeira: Corrigida a detecção de não convergência na última iteração
+  --   02/11/26 Daniel Madeira: Retorno direto nos polos e proteção contra divisão por zero
   --   
   -- =================================================================================================
   FUNCTION calcular_mollweide_theta (
@@ -1064,14 +1438,24 @@ AS
   IS
     l_theta     NUMBER;
     l_k         NUMBER;
+    l_denom     NUMBER;
     l_v         NUMBER;
     l_convergiu BOOLEAN := false;
     
   BEGIN
-    l_theta := p_latitude * (3.14159265359 / 180);
-    l_k := 3.14159265359 * sin(l_theta);
+    IF (abs(p_latitude) >= 90) THEN
+      IF (p_latitude < 0) THEN
+        RETURN (-c_pi / 2);
+      ELSE
+        RETURN (c_pi / 2);
+      END IF;
+    END IF;
+    l_theta := p_latitude * (c_pi / 180);
+    l_k := c_pi * sin(l_theta);
     FOR i IN 1 .. 10 LOOP
-      l_v := (l_theta + sin(l_theta) - l_k) / (1 + cos(l_theta));
+      l_denom := 1 + cos(l_theta);
+      EXIT WHEN (abs(l_denom) < 1E-12);
+      l_v := (l_theta + sin(l_theta) - l_k) / l_denom;
       l_theta := l_theta - l_v;
       IF (abs(l_v) < 1E-7) THEN
         l_convergiu := true;
@@ -1079,10 +1463,10 @@ AS
       END IF;
     END LOOP;
     IF NOT l_convergiu THEN
-      IF (l_theta < 0) THEN
-        l_theta := (-3.14159265359 / 2);
+      IF (p_latitude < 0) THEN
+        l_theta := (-c_pi / 2);
       ELSE
-        l_theta := (3.14159265359 / 2);
+        l_theta := (c_pi / 2);
       END IF;
     ELSE
       l_theta := l_theta * 0.5;
@@ -1119,8 +1503,8 @@ AS
     l_cx        NUMBER;
     
   BEGIN
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    l_cx := 2 * sqrt(2) / 3.14159265359;
+    l_longitude := p_longitude * (c_pi / 180);
+    l_cx := 2 * sqrt(2) / c_pi;
     RETURN (l_cx * l_longitude * cos(p_theta));
     
   END calcular_mollweide_x;
@@ -1181,8 +1565,8 @@ AS
     l_longitude NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
     RETURN (l_longitude * (0.870700 - 0.131979 * power(l_latitude, 2) - 0.013791 * power(l_latitude, 4) + 0.003971 * power(l_latitude, 10) - 0.001529 * power(l_latitude, 12)));
     
   END calcular_natural_earth_x;
@@ -1210,7 +1594,7 @@ AS
     l_latitude  NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
     RETURN (1.007226 * l_latitude + 0.015085 * power(l_latitude, 3) - 0.044475 * power(l_latitude, 7) + 0.028874 * power(l_latitude, 9) - 0.005916 * power(l_latitude, 11));
     
   END calcular_natural_earth_y;
@@ -1244,8 +1628,8 @@ AS
     l_latitude6 NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
     l_latitude2 := l_latitude * l_latitude;
     l_latitude4 := l_latitude2 * l_latitude2;
     l_latitude6 := l_latitude2 * l_latitude4;
@@ -1278,7 +1662,7 @@ AS
     l_latitude4 NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
     l_latitude2 := l_latitude * l_latitude;
     l_latitude4 := l_latitude2 * l_latitude2;
     RETURN (l_latitude * (1.01183 + l_latitude4 * l_latitude4 * (0.01926 * l_latitude2 - 0.00396 * l_latitude4 - 0.02625)));
@@ -1308,7 +1692,7 @@ AS
     l_longitude NUMBER;
     
   BEGIN
-    l_longitude := p_longitude * (3.14159265359 / 180);
+    l_longitude := p_longitude * (c_pi / 180);
     RETURN l_longitude;
     
   END calcular_patterson_x;
@@ -1337,7 +1721,7 @@ AS
     l_latitude2 NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
     l_latitude2 := l_latitude * l_latitude;
     RETURN (l_latitude * (1.0148 + l_latitude2 * l_latitude2 * (0.23185 + l_latitude2 * (-0.14499 + l_latitude2 * 0.02406))));
     
@@ -1369,9 +1753,9 @@ AS
     l_longitude NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    RETURN ((2.6666 - 0.367 * power(l_latitude, 2) - 0.150 * power(l_latitude, 4) + 0.0379 * power(l_latitude, 6)) * l_longitude / 3.14159265359);
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    RETURN ((2.6666 - 0.367 * power(l_latitude, 2) - 0.150 * power(l_latitude, 4) + 0.0379 * power(l_latitude, 6)) * l_longitude / c_pi);
     
   END calcular_robinson_x;
 
@@ -1399,7 +1783,7 @@ AS
     l_s        NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
     IF (l_latitude >= 0) THEN
       l_s := 1;
     ELSE
@@ -1424,6 +1808,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Conversão de longitude para radianos (alinhado com versão C)
   --   
   -- =================================================================================================
   FUNCTION calcular_sinusoidal_x (
@@ -1432,11 +1817,13 @@ AS
   )
   RETURN NUMBER
   IS
-    l_latitude NUMBER;
+    l_latitude  NUMBER;
+    l_longitude NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    RETURN p_longitude * cos(l_latitude);
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    RETURN l_longitude * cos(l_latitude);
     
   END calcular_sinusoidal_x;
 
@@ -1454,6 +1841,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Conversão de latitude para radianos (alinhado com versão C)
   --   
   -- =================================================================================================
   FUNCTION calcular_sinusoidal_y (
@@ -1462,7 +1850,7 @@ AS
   RETURN NUMBER
   IS
   BEGIN
-    RETURN p_latitude;
+    RETURN p_latitude * (c_pi / 180);
     
   END calcular_sinusoidal_y;
 
@@ -1480,6 +1868,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Proteção contra radicando negativo
   --   
   -- =================================================================================================
   FUNCTION calcular_wagner_vi_x (
@@ -1490,11 +1879,16 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_radicando NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    RETURN (l_longitude * sqrt(1 - 3 * power(l_latitude / 3.14159265359, 2)));
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    l_radicando := 1 - 3 * power(l_latitude / c_pi, 2);
+    IF (l_radicando < 0) THEN
+      l_radicando := 0;
+    END IF;
+    RETURN (l_longitude * sqrt(l_radicando));
     
   END calcular_wagner_vi_x;
 
@@ -1521,7 +1915,7 @@ AS
     l_latitude NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
     RETURN l_latitude;
     
   END calcular_wagner_vi_y;
@@ -1541,6 +1935,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   29/10/26 Daniel Madeira: sinc(0) = 1 para evitar divisão por zero (ORA-01476) em (0, 0)
+  --   02/11/26 Daniel Madeira: Proteção de intervalo [-1, 1] para acos
   --   
   -- =================================================================================================
   FUNCTION calcular_winkel_iii_x (
@@ -1551,19 +1946,26 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_prod      NUMBER;
     l_alpha     NUMBER;
     l_sinc      NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    l_alpha := acos(cos(l_latitude) * cos(l_longitude / 2));
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    l_prod := cos(l_latitude) * cos(l_longitude / 2);
+    IF (l_prod > 1) THEN
+      l_prod := 1;
+    ELSIF (l_prod < -1) THEN
+      l_prod := -1;
+    END IF;
+    l_alpha := acos(l_prod);
     IF (l_alpha < 1E-10) THEN -- limite de sin(a)/a quando a -> 0
       l_sinc := 1;
     ELSE
       l_sinc := sin(l_alpha) / l_alpha;
     END IF;
-    RETURN ((1 / 2) * (l_longitude * cos(acos(2 / 3.14159265359)) + ((2 * cos(l_latitude) * sin(l_longitude / 2)) / (l_sinc))));
+    RETURN ((1 / 2) * (l_longitude * cos(acos(2 / c_pi)) + ((2 * cos(l_latitude) * sin(l_longitude / 2)) / (l_sinc))));
     
   END calcular_winkel_iii_x;
 
@@ -1582,6 +1984,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   29/10/26 Daniel Madeira: sinc(0) = 1 para evitar divisão por zero (ORA-01476) em (0, 0)
+  --   02/11/26 Daniel Madeira: Proteção de intervalo [-1, 1] para acos
   --   
   -- =================================================================================================
   FUNCTION calcular_winkel_iii_y (
@@ -1592,13 +1995,20 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_prod      NUMBER;
     l_alpha     NUMBER;
     l_sinc      NUMBER;
     
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
-    l_alpha := acos(cos(l_latitude) * cos(l_longitude / 2));
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    l_prod := cos(l_latitude) * cos(l_longitude / 2);
+    IF (l_prod > 1) THEN
+      l_prod := 1;
+    ELSIF (l_prod < -1) THEN
+      l_prod := -1;
+    END IF;
+    l_alpha := acos(l_prod);
     IF (l_alpha < 1E-10) THEN -- limite de sin(a)/a quando a -> 0
       l_sinc := 1;
     ELSE
@@ -1607,6 +2017,56 @@ AS
     RETURN ((1 / 2) * (l_latitude + (sin(l_latitude) / (l_sinc))));
     
   END calcular_winkel_iii_y;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 02/11/2026
+  -- Description: Calcula simultaneamente as coordenadas cartesianas X e Y da projeção de Winkel
+  --              Tripel, compartilhando os termos intermediários alpha e sinc(alpha).
+  --              * SNYDER, J. P.; VOXLAND, P. M. An Album of Map Projections. p 233
+  --
+  -- Parameters:
+  --   @p_latitude  = Coordenada geográfica da distância ao Equador em graus em notação decimal
+  --   @p_longitude = Coordenada geográfica da distância ao meridiano de Greenwich em graus em notação decimal
+  --   @p_x         = Coordenada X no plano cartesiano (saída)
+  --   @p_y         = Coordenada Y no plano cartesiano (saída)
+  --
+  -- Change History:
+  --   02/11/26 Daniel Madeira: Versão inicial (alinhada com calcular_winkel_tripel em C)
+  --
+  -- =================================================================================================
+  PROCEDURE calcular_winkel_iii (
+    p_latitude  IN  NUMBER
+  , p_longitude IN  NUMBER
+  , p_x         OUT NUMBER
+  , p_y         OUT NUMBER
+  )
+  IS
+    l_latitude  NUMBER;
+    l_longitude NUMBER;
+    l_prod      NUMBER;
+    l_alpha     NUMBER;
+    l_sinc      NUMBER;
+
+  BEGIN
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+    l_prod := cos(l_latitude) * cos(l_longitude / 2);
+    IF (l_prod > 1) THEN
+      l_prod := 1;
+    ELSIF (l_prod < -1) THEN
+      l_prod := -1;
+    END IF;
+    l_alpha := acos(l_prod);
+    IF (l_alpha < 1E-10) THEN
+      l_sinc := 1;
+    ELSE
+      l_sinc := sin(l_alpha) / l_alpha;
+    END IF;
+    p_x := (1 / 2) * (l_longitude * (2 / c_pi) + ((2 * cos(l_latitude) * sin(l_longitude / 2)) / l_sinc));
+    p_y := (1 / 2) * (l_latitude + (sin(l_latitude) / l_sinc));
+
+  END calcular_winkel_iii;
 
   -- =================================================================================================
   -- Author:      Daniel Madeira
@@ -1623,6 +2083,7 @@ AS
   --
   -- Change History:
   --   06/09/26 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Proteção de intervalo [-1, 1] para asin
   --
   -- =================================================================================================
   FUNCTION calcular_equal_earth_x (
@@ -1634,7 +2095,10 @@ AS
   IS
     l_latitude  NUMBER;
     l_longitude NUMBER;
+    l_arg       NUMBER;
     l_theta     NUMBER;
+    l_t2        NUMBER;
+    l_t6        NUMBER;
     l_sqrt3     CONSTANT NUMBER := SQRT(3);
     l_A1        CONSTANT NUMBER :=  1.340264;
     l_A2        CONSTANT NUMBER := -0.081106;
@@ -1642,13 +2106,21 @@ AS
     l_A4        CONSTANT NUMBER :=  0.003796;
 
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
-    l_longitude := p_longitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
 
-    l_theta := asin((l_sqrt3 / 2) * sin(l_latitude));
+    l_arg := (l_sqrt3 / 2) * sin(l_latitude);
+    IF (l_arg > 1) THEN
+      l_arg := 1;
+    ELSIF (l_arg < -1) THEN
+      l_arg := -1;
+    END IF;
+    l_theta := asin(l_arg);
+    l_t2 := power(l_theta, 2);
+    l_t6 := power(l_theta, 6);
 
     RETURN ((p_raio * 2 * l_sqrt3 * l_longitude * cos(l_theta)) /
-            (3 * (l_A1 + 3 * l_A2 * power(l_theta, 2) + power(l_theta, 6) * (7 * l_A3 + 9 * l_A4 * power(l_theta, 2)))));
+            (3 * (l_A1 + 3 * l_A2 * l_t2 + l_t6 * (7 * l_A3 + 9 * l_A4 * l_t2))));
 
   END calcular_equal_earth_x;
 
@@ -1666,6 +2138,7 @@ AS
   --
   -- Change History:
   --   06/09/26 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Proteção de intervalo [-1, 1] para asin
   --
   -- =================================================================================================
   FUNCTION calcular_equal_earth_y (
@@ -1675,7 +2148,10 @@ AS
   RETURN NUMBER
   IS
     l_latitude NUMBER;
+    l_arg      NUMBER;
     l_theta    NUMBER;
+    l_t2       NUMBER;
+    l_t6       NUMBER;
     l_sqrt3    CONSTANT NUMBER := SQRT(3);
     l_A1       CONSTANT NUMBER :=  1.340264;
     l_A2       CONSTANT NUMBER := -0.081106;
@@ -1683,13 +2159,222 @@ AS
     l_A4       CONSTANT NUMBER :=  0.003796;
 
   BEGIN
-    l_latitude := p_latitude * (3.14159265359 / 180);
+    l_latitude := p_latitude * (c_pi / 180);
 
-    l_theta := asin((l_sqrt3 / 2) * sin(l_latitude));
+    l_arg := (l_sqrt3 / 2) * sin(l_latitude);
+    IF (l_arg > 1) THEN
+      l_arg := 1;
+    ELSIF (l_arg < -1) THEN
+      l_arg := -1;
+    END IF;
+    l_theta := asin(l_arg);
+    l_t2 := power(l_theta, 2);
+    l_t6 := power(l_theta, 6);
 
-    RETURN (p_raio * l_theta * (l_A1 + l_A2 * power(l_theta, 2) + power(l_theta, 6) * (l_A3 + l_A4 * power(l_theta, 2))));
+    RETURN (p_raio * l_theta * (l_A1 + l_A2 * l_t2 + l_t6 * (l_A3 + l_A4 * l_t2)));
 
   END calcular_equal_earth_y;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 02/11/2026
+  -- Description: Calcula simultaneamente as coordenadas cartesianas X e Y da projeção Equal Earth,
+  --              compartilhando o ângulo paramétrico theta e suas potências.
+  --              * ŠAVRIČ, B.; PATTERSON, T.; JENNY, B. The Equal Earth map projection. p 456
+  --
+  -- Parameters:
+  --   @p_latitude  = Coordenada geográfica (ou autálica) da distância ao Equador em graus em notação decimal
+  --   @p_longitude = Coordenada geográfica da distância ao meridiano de Greenwich em graus em notação decimal
+  --   @p_x         = Coordenada X no plano cartesiano (saída)
+  --   @p_y         = Coordenada Y no plano cartesiano (saída)
+  --   @p_raio      = Raio
+  --
+  -- Change History:
+  --   02/11/26 Daniel Madeira: Versão inicial (alinhada com calcular_equal_earth em C)
+  --
+  -- =================================================================================================
+  PROCEDURE calcular_equal_earth (
+    p_latitude  IN  NUMBER
+  , p_longitude IN  NUMBER
+  , p_x         OUT NUMBER
+  , p_y         OUT NUMBER
+  , p_raio      IN  NUMBER DEFAULT 1
+  )
+  IS
+    l_latitude  NUMBER;
+    l_longitude NUMBER;
+    l_arg       NUMBER;
+    l_theta     NUMBER;
+    l_t2        NUMBER;
+    l_t6        NUMBER;
+    l_sqrt3     CONSTANT NUMBER := SQRT(3);
+    l_A1        CONSTANT NUMBER :=  1.340264;
+    l_A2        CONSTANT NUMBER := -0.081106;
+    l_A3        CONSTANT NUMBER :=  0.000893;
+    l_A4        CONSTANT NUMBER :=  0.003796;
+
+  BEGIN
+    l_latitude := p_latitude * (c_pi / 180);
+    l_longitude := p_longitude * (c_pi / 180);
+
+    l_arg := (l_sqrt3 / 2) * sin(l_latitude);
+    IF (l_arg > 1) THEN
+      l_arg := 1;
+    ELSIF (l_arg < -1) THEN
+      l_arg := -1;
+    END IF;
+    l_theta := asin(l_arg);
+    l_t2 := l_theta * l_theta;
+    l_t6 := l_t2 * l_t2 * l_t2;
+
+    p_x := (p_raio * 2 * l_sqrt3 * l_longitude * cos(l_theta)) /
+           (3 * (l_A1 + 3 * l_A2 * l_t2 + l_t6 * (7 * l_A3 + 9 * l_A4 * l_t2)));
+    p_y := p_raio * l_theta * (l_A1 + l_A2 * l_t2 + l_t6 * (l_A3 + l_A4 * l_t2));
+
+  END calcular_equal_earth;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 02/11/2026
+  -- Description: Obtém os limites cartesianos máximos (semi-eixos X e Y) da projeção com cache.
+  --
+  -- Parameters:
+  --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
+  --   @p_x_max    = Limite máximo no eixo X (Equador, longitude 180°)
+  --   @p_y_max    = Limite máximo no eixo Y (Polo Norte, latitude 90°)
+  --
+  -- Change History:
+  --   02/11/26 Daniel Madeira: Versão inicial (alinhada com obter_limites_projecao em C)
+  --
+  -- =================================================================================================
+  PROCEDURE obter_limites_projecao (
+    p_projecao IN  VARCHAR2
+  , p_x_max    OUT NUMBER
+  , p_y_max    OUT NUMBER
+  )
+  IS
+  BEGIN
+    IF (p_projecao = g_ultima_projecao AND g_ultima_projecao IS NOT NULL) THEN
+      p_x_max := g_cache_x_max;
+      p_y_max := g_cache_y_max;
+      RETURN;
+    END IF;
+
+    CASE p_projecao
+      WHEN 'e' THEN
+        p_x_max := calcular_eckert_iv_x (calcular_eckert_iv_theta (0), 180);
+        p_y_max := calcular_eckert_iv_y (calcular_eckert_iv_theta (90));
+      WHEN 'E' THEN
+        p_x_max := calcular_eckert_vi_x (calcular_eckert_vi_theta (0), 180);
+        p_y_max := calcular_eckert_vi_y (calcular_eckert_vi_theta (90));
+      WHEN 'g' THEN
+        p_x_max := calcular_gott_equal_area_elliptical_x (0, 180);
+        p_y_max := calcular_gott_equal_area_elliptical_y (90, 0);
+      WHEN 'G' THEN
+        p_x_max := sin(0.446 * c_pi);
+        p_y_max := sin(0.446 * c_pi);
+      WHEN 'h' THEN
+        p_x_max := calcular_hammer_x (0, 180);
+        p_y_max := calcular_hammer_y (90, 0);
+      WHEN 'i' THEN
+        p_x_max := calcular_equal_earth_x (converter_geografica_para_autalica (0), 180);
+        p_y_max := calcular_equal_earth_y (converter_geografica_para_autalica (90));
+      WHEN 'k' THEN
+        p_x_max := calcular_kavrayskiy_vii_x (0, 180);
+        p_y_max := calcular_kavrayskiy_vii_y (90);
+      WHEN 'l' THEN
+        p_x_max := 2;
+        p_y_max := 2;
+      WHEN 'm' THEN
+        p_x_max := calcular_miller_x (180);
+        p_y_max := calcular_miller_y (90);
+      WHEN 'M' THEN
+        p_x_max := calcular_mollweide_x (calcular_mollweide_theta (0), 180);
+        p_y_max := calcular_mollweide_y (calcular_mollweide_theta (90));
+      WHEN 'n' THEN
+        p_x_max := calcular_natural_earth_x (0, 180);
+        p_y_max := calcular_natural_earth_y (90);
+      WHEN 'N' THEN
+        p_x_max := calcular_natural_earth_ii_x (0, 180);
+        p_y_max := calcular_natural_earth_ii_y (90);
+      WHEN 'p' THEN
+        p_x_max := calcular_patterson_x (180);
+        p_y_max := calcular_patterson_y (90);
+      WHEN 'r' THEN
+        p_x_max := calcular_robinson_x (0, 180);
+        p_y_max := calcular_robinson_y (90);
+      WHEN 's' THEN
+        p_x_max := calcular_sinusoidal_x (0, 180);
+        p_y_max := calcular_sinusoidal_y (90);
+      WHEN 't' THEN
+        p_x_max := calcular_mercator_x (180);
+        p_y_max := calcular_mercator_y (90);
+      WHEN 'w' THEN
+        p_x_max := calcular_wagner_vi_x (0, 180);
+        p_y_max := calcular_wagner_vi_y (90);
+      WHEN 'W' THEN
+        p_x_max := calcular_winkel_iii_x (0, 180);
+        p_y_max := calcular_winkel_iii_y (90, 0);
+      ELSE
+        p_x_max := 180;
+        p_y_max := 90;
+    END CASE;
+
+    g_ultima_projecao := p_projecao;
+    g_cache_x_max     := p_x_max;
+    g_cache_y_max     := p_y_max;
+
+  END obter_limites_projecao;
+
+  -- =================================================================================================
+  -- Author:      Daniel Madeira
+  -- Create date: 02/11/2026
+  -- Description: Ajusta a largura e a altura da imagem para a dimensão útil da projeção,
+  --              eliminando bordas vazias excedentes no arquivo SVG final.
+  --
+  -- Parameters:
+  --   @p_largura  = Tamanho horizontal da imagem do mapa em pontos (entrada/saída)
+  --   @p_altura   = Tamanho vertical da imagem do mapa em pontos (entrada/saída)
+  --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
+  --
+  -- Change History:
+  --   02/11/26 Daniel Madeira: Versão inicial (alinhada com ajustar_dimensoes_uteis em C)
+  --
+  -- =================================================================================================
+  PROCEDURE ajustar_dimensoes_uteis (
+    p_largura  IN OUT NUMBER
+  , p_altura   IN OUT NUMBER
+  , p_projecao IN     VARCHAR2
+  )
+  IS
+    l_x_max    NUMBER;
+    l_y_max    NUMBER;
+    l_modulo_x NUMBER;
+    l_modulo_y NUMBER;
+
+  BEGIN
+    p_largura := nvl(p_largura, 800);
+    p_altura  := nvl(p_altura, 400);
+
+    obter_limites_projecao (p_projecao, l_x_max, l_y_max);
+
+    l_modulo_x := p_largura / (l_x_max * 2);
+    l_modulo_y := p_altura / (l_y_max * 2);
+
+    IF (l_modulo_x < l_modulo_y) THEN
+      p_altura := round(l_y_max * 2 * l_modulo_x);
+    ELSE
+      p_largura := round(l_x_max * 2 * l_modulo_y);
+    END IF;
+
+    IF (p_largura < 1) THEN
+      p_largura := 1;
+    END IF;
+    IF (p_altura < 1) THEN
+      p_altura := 1;
+    END IF;
+
+  END ajustar_dimensoes_uteis;
 
   -- =================================================================================================
   -- Author:      Daniel Madeira
@@ -1710,6 +2395,7 @@ AS
   --   06/09/26 Daniel Madeira: Projeção Equal Earth
   --   20/09/26 Daniel Madeira: Projeção Gott–Mugnolo azimuthal centralizada no Equador
   --   20/09/26 Daniel Madeira: Projeção Lambert azimuthal equal-area com diâmetro máximo igual a 4
+  --   02/11/26 Daniel Madeira: Escala via obter_limites_projecao e arredondamento com round
   --   
   -- =================================================================================================
   FUNCTION converter_geo_pixel (
@@ -1721,190 +2407,117 @@ AS
   )
   RETURN coordenadas_xy_t
   IS
-    l_centro coordenadas_xy_t;
-    l_xy     coordenadas_xy_t;
-    l_modulo NUMBER;
-    l_theta  NUMBER;
+    l_centro       coordenadas_xy_t;
+    l_xy           coordenadas_xy_t;
+    l_x_proj       NUMBER;
+    l_y_proj       NUMBER;
+    l_x_max        NUMBER;
+    l_y_max        NUMBER;
+    l_modulo_x     NUMBER;
+    l_modulo_y     NUMBER;
+    l_modulo       NUMBER;
+    l_theta        NUMBER;
+    l_lat_autalica NUMBER;
   
   BEGIN
     l_centro := coordenar_centro (p_largura, p_altura);
     
     CASE
       WHEN (p_projecao = 'e') THEN -- Eckert IV projection
-        IF (p_largura / p_altura < 2.002) THEN
-          l_modulo := p_largura / (calcular_eckert_iv_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_eckert_iv_y (1.5697757215205) * 2);
-        END IF;
-        l_theta := calcular_eckert_iv_theta(p_latitude);
-        l_xy('x') := floor(l_centro('x') + (calcular_eckert_iv_x (l_theta, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_eckert_iv_y (l_theta) * l_modulo));
+        l_theta  := calcular_eckert_iv_theta (p_latitude);
+        l_x_proj := calcular_eckert_iv_x (l_theta, p_longitude);
+        l_y_proj := calcular_eckert_iv_y (l_theta);
             
       WHEN (p_projecao = 'E') THEN -- Eckert VI projection
-        IF (p_largura / p_altura < 2) THEN
-          l_modulo := p_largura / (calcular_eckert_vi_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_eckert_vi_y (1.570796326795) * 2);
-        END IF;
-        l_theta := calcular_eckert_vi_theta (p_latitude);
-        l_xy('x') := floor(l_centro('x') + (calcular_eckert_vi_x (l_theta, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_eckert_vi_y (l_theta) * l_modulo));
+        l_theta  := calcular_eckert_vi_theta (p_latitude);
+        l_x_proj := calcular_eckert_vi_x (l_theta, p_longitude);
+        l_y_proj := calcular_eckert_vi_y (l_theta);
            
       WHEN (p_projecao = 'g') THEN -- Gott equal-area elliptical projection
-        IF (p_largura / p_altura < 1.621) THEN
-          l_modulo := p_largura / (calcular_gott_equal_area_elliptical_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_gott_equal_area_elliptical_y (90, 0) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_gott_equal_area_elliptical_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_gott_equal_area_elliptical_y (p_latitude, p_longitude) * l_modulo));
+        calcular_gott_equal_area_elliptical (p_latitude, p_longitude, l_x_proj, l_y_proj);
          
       WHEN (p_projecao = 'G') THEN -- Gott–Mugnolo azimuthal projection
-        IF (p_largura / p_altura < 1) THEN
-          l_modulo := p_largura / (sin(0.446 * 3.14159265359) * 2);
-        ELSE
-          l_modulo := p_altura / (sin(0.446 * 3.14159265359) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_gott_mugnolo_azimuthal_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_gott_mugnolo_azimuthal_y (p_latitude, p_longitude) * l_modulo));
+        calcular_gott_mugnolo_azimuthal (p_latitude, p_longitude, l_x_proj, l_y_proj);
             
       WHEN (p_projecao = 'h') THEN -- Hammer projection
-        IF (p_largura / p_altura < 2) THEN
-          l_modulo := p_largura / (calcular_hammer_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_hammer_y (90, 0) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_hammer_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_hammer_y (p_latitude, p_longitude) * l_modulo));
+        calcular_hammer (p_latitude, p_longitude, l_x_proj, l_y_proj);
 
       WHEN (p_projecao = 'i') THEN -- Equal Earth projection
-        IF (p_largura / p_altura < 2.05) THEN
-          l_modulo := p_largura / (calcular_equal_earth_x (converter_geografica_para_autalica(0), 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_equal_earth_y (converter_geografica_para_autalica(90)) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_equal_earth_x (converter_geografica_para_autalica(p_latitude), p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_equal_earth_y (converter_geografica_para_autalica(p_latitude)) * l_modulo));
+        l_lat_autalica := converter_geografica_para_autalica (p_latitude);
+        calcular_equal_earth (l_lat_autalica, p_longitude, l_x_proj, l_y_proj);
 
       WHEN (p_projecao = 'k') THEN -- Kavrayskiy VII projection
-        IF (p_largura / p_altura < 1.733) THEN
-          l_modulo := p_largura / (calcular_kavrayskiy_vii_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_kavrayskiy_vii_y (90) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_kavrayskiy_vii_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_kavrayskiy_vii_y (p_latitude) * l_modulo));
+        l_x_proj := calcular_kavrayskiy_vii_x (p_latitude, p_longitude);
+        l_y_proj := calcular_kavrayskiy_vii_y (p_latitude);
 
       WHEN (p_projecao = 'l') THEN -- Lambert azimuthal equal-area projection
-        IF (p_largura / p_altura < 1) THEN
-          l_modulo := p_largura / 4;
-        ELSE
-          l_modulo := p_altura / 4;
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_lambert_azimuthal_equal_area_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_lambert_azimuthal_equal_area_y (p_latitude, p_longitude) * l_modulo));
+        calcular_lambert_azimuthal_equal_area (p_latitude, p_longitude, l_x_proj, l_y_proj);
             
       WHEN (p_projecao = 'm') THEN -- Miller cylindrical projection
-        IF (p_largura / p_altura < 1.363) THEN
-          l_modulo := p_largura / (calcular_miller_x (180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_miller_y (90) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_miller_x (p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_miller_y (p_latitude) * l_modulo));
+        l_x_proj := calcular_miller_x (p_longitude);
+        l_y_proj := calcular_miller_y (p_latitude);
             
       WHEN (p_projecao = 'M') THEN -- Mollweide projection
-        IF (p_largura / p_altura < 2) THEN
-          l_modulo := p_largura / (calcular_mollweide_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_mollweide_y (1.570796326795) * 2);
-        END IF;
-        l_theta := calcular_mollweide_theta (p_latitude);
-        l_xy('x') := floor(l_centro('x') + (calcular_mollweide_x (l_theta, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_mollweide_y (l_theta) * l_modulo));
+        l_theta  := calcular_mollweide_theta (p_latitude);
+        l_x_proj := calcular_mollweide_x (l_theta, p_longitude);
+        l_y_proj := calcular_mollweide_y (l_theta);
             
       WHEN (p_projecao = 'n') THEN -- Natural Earth projection
-        IF (p_largura / p_altura < 1.923) THEN
-          l_modulo := p_largura / (calcular_natural_earth_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_natural_earth_y (90) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_natural_earth_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_natural_earth_y (p_latitude) * l_modulo));
+        l_x_proj := calcular_natural_earth_x (p_latitude, p_longitude);
+        l_y_proj := calcular_natural_earth_y (p_latitude);
             
       WHEN (p_projecao = 'N') THEN -- Natural Earth II projection
-        IF (p_largura / p_altura < 1.869) THEN
-          l_modulo := p_largura / (calcular_natural_earth_ii_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_natural_earth_ii_y (90) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_natural_earth_ii_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_natural_earth_ii_y (p_latitude) * l_modulo));
+        l_x_proj := calcular_natural_earth_ii_x (p_latitude, p_longitude);
+        l_y_proj := calcular_natural_earth_ii_y (p_latitude);
             
       WHEN (p_projecao = 'p') THEN -- Patterson projection
-        IF (p_largura / p_altura < 1.755) THEN
-          l_modulo := p_largura / (calcular_patterson_x (180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_patterson_y (90) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_patterson_x (p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_patterson_y (p_latitude) * l_modulo));
+        l_x_proj := calcular_patterson_x (p_longitude);
+        l_y_proj := calcular_patterson_y (p_latitude);
             
       WHEN (p_projecao = 'r') THEN -- Robinson projection
-        IF (p_largura / p_altura < 1.969) THEN
-          l_modulo := p_largura / (calcular_robinson_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_robinson_y (90) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_robinson_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_robinson_y (p_latitude) * l_modulo));
+        l_x_proj := calcular_robinson_x (p_latitude, p_longitude);
+        l_y_proj := calcular_robinson_y (p_latitude);
             
       WHEN (p_projecao = 's') THEN -- sinusoidal projection
-        IF (p_largura / p_altura < 2) THEN
-          l_modulo := p_largura / (calcular_sinusoidal_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_sinusoidal_y (90) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_sinusoidal_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_sinusoidal_y (p_latitude) * l_modulo));
+        l_x_proj := calcular_sinusoidal_x (p_latitude, p_longitude);
+        l_y_proj := calcular_sinusoidal_y (p_latitude);
             
       WHEN (p_projecao = 't') THEN -- Mercator projection
-        IF (p_largura / p_altura < 1) THEN
-          l_modulo := p_largura / (calcular_mercator_x (180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_mercator_y (90) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_mercator_x (p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_mercator_y (p_latitude) * l_modulo));
+        l_x_proj := calcular_mercator_x (p_longitude);
+        l_y_proj := calcular_mercator_y (p_latitude);
           
       WHEN (p_projecao = 'w') THEN -- Wagner VI projection
-        IF (p_largura / p_altura < 2) THEN
-          l_modulo := p_largura / (calcular_wagner_vi_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_wagner_vi_y (90) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_wagner_vi_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_wagner_vi_y (p_latitude) * l_modulo));
+        l_x_proj := calcular_wagner_vi_x (p_latitude, p_longitude);
+        l_y_proj := calcular_wagner_vi_y (p_latitude);
             
       WHEN (p_projecao = 'W') THEN -- Winkel tripel projection
-        IF (p_largura / p_altura < 1.637) THEN
-          l_modulo := p_largura / (calcular_winkel_iii_x (0, 180) * 2);
-        ELSE
-          l_modulo := p_altura / (calcular_winkel_iii_y (90, 0) * 2);
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (calcular_winkel_iii_x (p_latitude, p_longitude) * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (calcular_winkel_iii_y (p_latitude, p_longitude) * l_modulo));
+        calcular_winkel_iii (p_latitude, p_longitude, l_x_proj, l_y_proj);
             
       ELSE -- c: equirectangular projection -> plate carrée
            -- SNYDER, J. P.; VOXLAND, P. M. An Album of Map Projections. p 219
-        IF (p_largura / p_altura < 2) THEN
-          l_modulo := p_largura / 360;
-        ELSE
-          l_modulo := p_altura / 180;
-        END IF;
-        l_xy('x') := floor(l_centro('x') + (p_longitude * l_modulo));
-        l_xy('y') := floor(l_centro('y') - (p_latitude * l_modulo));
+        l_x_proj := p_longitude;
+        l_y_proj := p_latitude;
     END CASE;
+
+    obter_limites_projecao (p_projecao, l_x_max, l_y_max);
+    l_modulo_x := p_largura / (l_x_max * 2);
+    l_modulo_y := p_altura / (l_y_max * 2);
+    IF (l_modulo_x < l_modulo_y) THEN
+      IF (round(l_x_max * 2 * l_modulo_y) <= p_largura) THEN
+        l_modulo := l_modulo_y;
+      ELSE
+        l_modulo := l_modulo_x;
+      END IF;
+    ELSE
+      IF (round(l_y_max * 2 * l_modulo_x) <= p_altura) THEN
+        l_modulo := l_modulo_x;
+      ELSE
+        l_modulo := l_modulo_y;
+      END IF;
+    END IF;
+
+    l_xy('x') := round(l_centro('x') + (l_x_proj * l_modulo));
+    l_xy('y') := round(l_centro('y') - (l_y_proj * l_modulo));
     RETURN l_xy;
     
   END converter_geo_pixel;
@@ -1925,6 +2538,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   16/01/22 Daniel Madeira: Comparação com ponto anterior
+  --   02/11/26 Daniel Madeira: Resolução de amostragem ampliada de 10° para 2°
   --   
   -- =================================================================================================
   FUNCTION montar_caminho_paralelo (
@@ -1945,8 +2559,8 @@ AS
     l_svg := '<path d="M' || l_ponto('x') || ',' || l_ponto('y');
     l_anterior('x') := l_ponto('x');
     l_anterior('y') := l_ponto('y');
-    FOR lon IN -18 .. 18 LOOP
-      l_longitude := lon * 10;
+    FOR lon IN -90 .. 90 LOOP
+      l_longitude := lon * 2;
       l_ponto := converter_geo_pixel (p_latitude, l_longitude, p_largura, p_altura, p_projecao);
       IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
         l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
@@ -2011,6 +2625,7 @@ AS
   --   15/01/22 Daniel Madeira: Versão inicial
   --   20/09/26 Daniel Madeira: Projeção Gott-Mugnolo (G) incluída na montagem por caminho
   --   29/10/26 Daniel Madeira: Convertida em procedimento que anexa ao acumulador (sem limite de 32767)
+  --   02/11/26 Daniel Madeira: Remoção dos paralelos degenerados de +-90° (polos)
   --   
   -- =================================================================================================
   PROCEDURE exibir_paralelos (
@@ -2021,7 +2636,7 @@ AS
   )
   IS
     TYPE lat_type IS TABLE OF NUMBER;
-    l_lat lat_type := lat_type (15, 30, 45, 60, 75, 90);
+    l_lat lat_type := lat_type (15, 30, 45, 60, 75);
     
   BEGIN
     FOR i IN 1 .. l_lat.count LOOP
@@ -2052,6 +2667,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   16/01/22 Daniel Madeira: Comparação com ponto anterior
+  --   02/11/26 Daniel Madeira: Salto em lat = 0 no meridiano +-180 das projeções azimutais (l e G)
   --   
   -- =================================================================================================
   FUNCTION montar_caminho_meridiano (
@@ -2074,8 +2690,15 @@ AS
     l_anterior('y') := l_ponto('y');
     FOR lat IN -45 .. 45 LOOP
       l_latitude := lat * 2;
+      IF (p_projecao IN ('l', 'G') AND abs(p_longitude) = 180 AND l_latitude = 0) THEN
+        CONTINUE;
+      END IF;
       l_ponto := converter_geo_pixel (l_latitude, p_longitude, p_largura, p_altura, p_projecao);
-      IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
+      IF (p_projecao IN ('l', 'G') AND abs(p_longitude) = 180 AND l_latitude = 2) THEN
+        l_svg := l_svg || ' M' || l_ponto('x') || ',' || l_ponto('y');
+        l_anterior('x') := l_ponto('x');
+        l_anterior('y') := l_ponto('y');
+      ELSIF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
         l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
         l_anterior('x') := l_ponto('x');
         l_anterior('y') := l_ponto('y');
@@ -2136,6 +2759,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   16/01/22 Daniel Madeira: Comparação com ponto anterior
+  --   02/11/26 Daniel Madeira: Resolução de amostragem ampliada de 10° para 2°
   --   
   -- =================================================================================================
   FUNCTION montar_caminho_circulo (
@@ -2156,8 +2780,8 @@ AS
     l_svg := '<path d="M' || l_ponto('x') || ',' || l_ponto('y');
     l_anterior('x') := l_ponto('x');
     l_anterior('y') := l_ponto('y');
-    FOR lon IN -18 .. 18 LOOP
-      l_longitude := lon * 10;
+    FOR lon IN -90 .. 90 LOOP
+      l_longitude := lon * 2;
       l_ponto := converter_geo_pixel (p_latitude, l_longitude, p_largura, p_altura, p_projecao);
       IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
         l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
@@ -2266,6 +2890,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   20/09/26 Daniel Madeira: Projeção Gott-Mugnolo (G) incluída no W/E fixo
+  --   02/11/26 Daniel Madeira: Uso de -180 e 180 exatos com o tratamento de antípoda em l e G
   --   
   -- =================================================================================================
   FUNCTION exibir_equador (
@@ -2277,19 +2902,11 @@ AS
   IS
     l_ocidente coordenadas_xy_t;
     l_oriente  coordenadas_xy_t;
-    l_w        NUMBER;
-    l_e        NUMBER;
     l_svg      VARCHAR2(32767);
   
   BEGIN
-    l_w := -180;
-    l_e := 180;
-    IF (p_projecao = 'l' OR p_projecao = 'G') THEN
-      l_w := l_w + 1;
-      l_e := l_e - 1;
-    END IF;
-    l_ocidente := converter_geo_pixel (0, l_w, p_largura, p_altura, p_projecao);
-    l_oriente := converter_geo_pixel (0, l_e, p_largura, p_altura, p_projecao);
+    l_ocidente := converter_geo_pixel (0, -180, p_largura, p_altura, p_projecao);
+    l_oriente := converter_geo_pixel (0, 180, p_largura, p_altura, p_projecao);
     l_svg := '<line x1="' || l_ocidente('x') || '" y1="' || l_ocidente('y') || '" x2="' || l_oriente('x') || '" y2="' || l_oriente('y') || '" />' || chr(13) || chr(10);
     RETURN l_svg;
     
@@ -2345,6 +2962,7 @@ AS
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   29/10/26 Daniel Madeira: Retorno em CLOB
+  --   02/11/26 Daniel Madeira: Ajuste para as dimensões úteis da projeção
   --   
   -- =================================================================================================
   FUNCTION exibir_grade (
@@ -2355,17 +2973,20 @@ AS
   RETURN CLOB
   IS
     l_svg      svg_t;
+    l_largura  NUMBER      := p_largura;
+    l_altura   NUMBER      := p_altura;
     l_projecao VARCHAR2(1) := normalizar_projecao (p_projecao);
     
   BEGIN
+    ajustar_dimensoes_uteis (l_largura, l_altura, l_projecao);
     svg_iniciar (l_svg);
     svg_anexar (l_svg, '<g fill="none" stroke="rgb(240,240,240)" stroke-width="1">' || chr(13) || chr(10));
     
-    exibir_paralelos (p_largura, p_altura, l_projecao, l_svg);
-    exibir_meridianos (p_largura, p_altura, l_projecao, l_svg);
-    exibir_circulos (p_largura, p_altura, l_projecao, l_svg);
-    svg_anexar (l_svg, exibir_equador (p_largura, p_altura, l_projecao));
-    svg_anexar (l_svg, exibir_greenwich (p_largura, p_altura, l_projecao));
+    exibir_paralelos (l_largura, l_altura, l_projecao, l_svg);
+    exibir_meridianos (l_largura, l_altura, l_projecao, l_svg);
+    exibir_circulos (l_largura, l_altura, l_projecao, l_svg);
+    svg_anexar (l_svg, exibir_equador (l_largura, l_altura, l_projecao));
+    svg_anexar (l_svg, exibir_greenwich (l_largura, l_altura, l_projecao));
     
     svg_anexar (l_svg, '</g>' || chr(13) || chr(10));
     RETURN svg_finalizar (l_svg);
@@ -2381,18 +3002,22 @@ AS
   --   @p_largura  = Tamanho horizontal da imagem do mapa em pontos
   --   @p_altura   = Tamanho vertical da imagem do mapa em pontos
   --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
+  --   @p_raio     = Tamanho (raio) em pontos do marcador das cidades (opcional; padrão proporcional à largura)
   -- Returns:
   --   Os elementos <circle> em SVG para as posições das cidades
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
   --   29/10/26 Daniel Madeira: Retorno em CLOB
+  --   02/11/26 Daniel Madeira: Ajuste para as dimensões úteis da projeção, raio mínimo >= 1
+  --                            (fator 0.003), parâmetro opcional p_raio e validação dos intervalos geográficos
   --   
   -- =================================================================================================
   FUNCTION exibir_cidades (
     p_largura  IN NUMBER   DEFAULT 800
   , p_altura   IN NUMBER   DEFAULT 400
   , p_projecao IN VARCHAR2 DEFAULT 'c'
+  , p_raio     IN NUMBER   DEFAULT NULL
   )
   RETURN CLOB
   IS
@@ -2402,10 +3027,14 @@ AS
         FROM worldcities
        WHERE lat IS NOT NULL
          AND lng IS NOT NULL
+         AND lat BETWEEN -90 AND 90
+         AND lng BETWEEN -180 AND 180
          AND capital = 'primary'
     ORDER BY population;
     
     l_svg       svg_t;
+    l_largura   NUMBER      := p_largura;
+    l_altura    NUMBER      := p_altura;
     l_projecao  VARCHAR2(1) := normalizar_projecao (p_projecao);
     l_r         NUMBER;
     l_latitude  NUMBER;
@@ -2414,15 +3043,25 @@ AS
     l_titulo    VARCHAR2(200);
     
   BEGIN
+    ajustar_dimensoes_uteis (l_largura, l_altura, l_projecao);
     svg_iniciar (l_svg);
     svg_anexar (l_svg, '<g fill="rgb(33,42,116)" stroke-width="0" onmouseover="evt.target.setAttribute(''fill'', ''blue'');" onmouseout="evt.target.setAttribute(''fill'',''red'');">' || chr(13) || chr(10));
-    l_r := round(p_largura * 0.002);
+    IF (p_raio IS NOT NULL AND p_raio > 0) THEN
+      l_r := round(p_raio);
+    ELSE
+      l_r := round(l_largura * 0.003);
+    END IF;
+    IF (l_r < 1) THEN
+      l_r := 1;
+    END IF;
     FOR cidade IN c_cidades LOOP
       l_latitude := cidade.lat;
       l_longitude := cidade.lng;
-      l_ponto := converter_geo_pixel (l_latitude, l_longitude, p_largura, p_altura, l_projecao);
-      l_titulo := cidade.city || ' (' || cidade.country || ')';
-      svg_anexar (l_svg, '<circle id="' || cidade.id || '" cx="' || l_ponto('x') || '" cy="' || l_ponto('y') || '" r="' || l_r || '"><title>' || l_titulo || '</title></circle>' || chr(13) || chr(10));
+      IF (l_latitude >= -90 AND l_latitude <= 90 AND l_longitude >= -180 AND l_longitude <= 180) THEN
+        l_ponto := converter_geo_pixel (l_latitude, l_longitude, l_largura, l_altura, l_projecao);
+        l_titulo := cidade.city || ' (' || cidade.country || ')';
+        svg_anexar (l_svg, '<circle id="' || cidade.id || '" cx="' || l_ponto('x') || '" cy="' || l_ponto('y') || '" r="' || l_r || '"><title>' || l_titulo || '</title></circle>' || chr(13) || chr(10));
+      END IF;
     END LOOP;
     svg_anexar (l_svg, '</g>' || chr(13) || chr(10));
     
@@ -2447,6 +3086,7 @@ AS
   --   29/10/26 Daniel Madeira: Convertida em procedimento que anexa o <polygon> ao acumulador
   --                            (remove o limite de 8000 bytes por anel) e não descarta mais um
   --                            primeiro ponto que caia exatamente no pixel (0, 0)
+  --   02/11/26 Daniel Madeira: Validação de intervalos geográficos (lat em [-90, 90], lon em [-180, 180])
   --   
   -- =================================================================================================
   PROCEDURE extrair_poligono (
@@ -2462,30 +3102,33 @@ AS
     l_longitude   NUMBER;
     l_ponto       coordenadas_xy_t;
     l_anterior    coordenadas_xy_t;
-    l_primeiro    BOOLEAN := true;
+    l_aberto      BOOLEAN := false;
     
   BEGIN
     IF (p_poligono IS NULL) OR (p_poligono.get_size = 0) THEN
       RETURN;
     END IF;
-    svg_anexar (p_svg, '<polygon points="');
     FOR i IN 0 .. p_poligono.get_size - 1 LOOP
       l_coordenadas := treat(p_poligono.get(i) AS json_array_t);
       l_latitude := l_coordenadas.get_number(1);
       l_longitude := l_coordenadas.get_number(0);
-      l_ponto := converter_geo_pixel (l_latitude, l_longitude, p_largura, p_altura, p_projecao);
-      IF l_primeiro THEN
-        svg_anexar (p_svg, l_ponto('x') || ',' || l_ponto('y'));
-        l_primeiro := false;
-        l_anterior('x') := l_ponto('x');
-        l_anterior('y') := l_ponto('y');
-      ELSIF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
-        svg_anexar (p_svg, ' ' || l_ponto('x') || ',' || l_ponto('y'));
-        l_anterior('x') := l_ponto('x');
-        l_anterior('y') := l_ponto('y');
+      IF (l_latitude >= -90 AND l_latitude <= 90 AND l_longitude >= -180 AND l_longitude <= 180) THEN
+        l_ponto := converter_geo_pixel (l_latitude, l_longitude, p_largura, p_altura, p_projecao);
+        IF NOT l_aberto THEN
+          svg_anexar (p_svg, '<polygon points="' || l_ponto('x') || ',' || l_ponto('y'));
+          l_aberto := true;
+          l_anterior('x') := l_ponto('x');
+          l_anterior('y') := l_ponto('y');
+        ELSIF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
+          svg_anexar (p_svg, ' ' || l_ponto('x') || ',' || l_ponto('y'));
+          l_anterior('x') := l_ponto('x');
+          l_anterior('y') := l_ponto('y');
+        END IF;
       END IF;
     END LOOP;
-    svg_anexar (p_svg, '" />' || chr(13) || chr(10));
+    IF l_aberto THEN
+      svg_anexar (p_svg, '" />' || chr(13) || chr(10));
+    END IF;
     
   END extrair_poligono;
   
@@ -2537,6 +3180,7 @@ AS
   -- Change History:
   --   06/03/22 Daniel Madeira: Versão inicial
   --   29/10/26 Daniel Madeira: Retorno em CLOB
+  --   02/11/26 Daniel Madeira: Ajuste para as dimensões úteis da projeção
   --   
   -- =================================================================================================
   FUNCTION exibir_continente (
@@ -2548,6 +3192,8 @@ AS
   RETURN CLOB
   IS
     l_svg         svg_t;
+    l_largura     NUMBER      := p_largura;
+    l_altura      NUMBER      := p_altura;
     l_projecao    VARCHAR2(1) := normalizar_projecao (p_projecao);
     l_blob        BLOB;
     l_object      json_object_t;
@@ -2561,6 +3207,7 @@ AS
     l_nested_1    json_array_t;
     l_nested_2    json_array_t;
   BEGIN
+    ajustar_dimensoes_uteis (l_largura, l_altura, l_projecao);
     svg_iniciar (l_svg);
     svg_anexar (l_svg, '<g fill="rgb(200,200,200)" fill-rule="nonzero" stroke="rgb(152,152,152)" stroke-width="1">' || chr(13) || chr(10));
     
@@ -2579,14 +3226,14 @@ AS
         IF (l_type = 'Polygon') THEN
           FOR j IN 0 .. l_coordinates.get_size - 1 LOOP
             l_nested_1 := treat(l_coordinates.get(j) AS json_array_t);
-            extrair_poligono (l_nested_1, p_largura, p_altura, l_projecao, l_svg);
+            extrair_poligono (l_nested_1, l_largura, l_altura, l_projecao, l_svg);
           END LOOP;
         ELSIF (l_type = 'MultiPolygon') THEN
           FOR j IN 0 .. l_coordinates.get_size - 1 LOOP
             l_nested_1 := treat(l_coordinates.get(j) AS json_array_t);
             FOR k IN 0 .. l_nested_1.get_size - 1 LOOP
               l_nested_2 := treat(l_nested_1.get(k) AS json_array_t);
-              extrair_poligono (l_nested_2, p_largura, p_altura, l_projecao, l_svg);
+              extrair_poligono (l_nested_2, l_largura, l_altura, l_projecao, l_svg);
             END LOOP;
           END LOOP;
         END IF;
@@ -2616,6 +3263,7 @@ AS
   --   20/09/26 Daniel Madeira: Fundo circular na projeção Gott-Mugnolo (G)
   --   20/09/26 Daniel Madeira: Projeção Lambert azimuthal equal-area com diâmetro máximo igual a 4
   --   29/10/26 Daniel Madeira: Retorno em CLOB e normalização do código da projeção
+  --   02/11/26 Daniel Madeira: Ajuste para as dimensões úteis da projeção e resolução de 2° nas bordas polares
   --   
   -- =================================================================================================
   FUNCTION exibir_fundo_azul (
@@ -2626,6 +3274,8 @@ AS
   RETURN CLOB
   IS
     l_svg       VARCHAR2(32767);
+    l_largura   NUMBER      := p_largura;
+    l_altura    NUMBER      := p_altura;
     l_projecao  VARCHAR2(1) := normalizar_projecao (p_projecao);
     l_centro    coordenadas_xy_t;
     l_raio      NUMBER;
@@ -2635,22 +3285,23 @@ AS
     l_longitude NUMBER;
     
   BEGIN
+    ajustar_dimensoes_uteis (l_largura, l_altura, l_projecao);
     IF (l_projecao = 'l' OR l_projecao = 'G') THEN
-      l_centro := coordenar_centro (p_largura, p_altura);
-      IF ((p_largura / p_altura) < 1) THEN
-        l_raio := round (p_largura / 2);
+      l_centro := coordenar_centro (l_largura, l_altura);
+      IF ((l_largura / l_altura) < 1) THEN
+        l_raio := round (l_largura / 2);
       ELSE
-        l_raio := round (p_altura / 2);
+        l_raio := round (l_altura / 2);
       END IF;
       l_svg := '<circle cx="' || l_centro('x') || '" cy="' || l_centro('y') || '" r="' || l_raio || '" fill="rgb(174,214,241)" />' || chr(13) || chr(10);
     ELSE
-      l_ponto := converter_geo_pixel (90, -180, p_largura, p_altura, l_projecao);
+      l_ponto := converter_geo_pixel (90, -180, l_largura, l_altura, l_projecao);
       l_svg := '<path d="M' || l_ponto('x') || ',' || l_ponto('y');
       l_anterior('x') := l_ponto('x');
       l_anterior('y') := l_ponto('y');
-      FOR lon IN -18 .. 18 LOOP
-        l_longitude := lon * 10;
-        l_ponto := converter_geo_pixel (90, l_longitude, p_largura, p_altura, l_projecao);
+      FOR lon IN -90 .. 90 LOOP
+        l_longitude := lon * 2;
+        l_ponto := converter_geo_pixel (90, l_longitude, l_largura, l_altura, l_projecao);
         IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
           l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
           l_anterior('x') := l_ponto('x');
@@ -2659,16 +3310,16 @@ AS
       END LOOP;
       FOR lat IN REVERSE -45 .. 45 LOOP
         l_latitude := lat * 2;
-        l_ponto := converter_geo_pixel (l_latitude, 180, p_largura, p_altura, l_projecao);
+        l_ponto := converter_geo_pixel (l_latitude, 180, l_largura, l_altura, l_projecao);
         IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
           l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
           l_anterior('x') := l_ponto('x');
           l_anterior('y') := l_ponto('y');
         END IF;
       END LOOP;
-      FOR lon IN REVERSE -18 .. 18 LOOP
-        l_longitude := lon * 10;
-        l_ponto := converter_geo_pixel (-90, l_longitude, p_largura, p_altura, l_projecao);
+      FOR lon IN REVERSE -90 .. 90 LOOP
+        l_longitude := lon * 2;
+        l_ponto := converter_geo_pixel (-90, l_longitude, l_largura, l_altura, l_projecao);
         IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
           l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
           l_anterior('x') := l_ponto('x');
@@ -2677,7 +3328,7 @@ AS
       END LOOP;
       FOR lat IN -45 .. 45 LOOP
         l_latitude := lat * 2;
-        l_ponto := converter_geo_pixel (l_latitude, -180, p_largura, p_altura, l_projecao);
+        l_ponto := converter_geo_pixel (l_latitude, -180, l_largura, l_altura, l_projecao);
         IF (l_ponto('x') != l_anterior('x')) OR (l_ponto('y') != l_anterior('y')) THEN
           l_svg := l_svg || ' L' || l_ponto('x') || ',' || l_ponto('y');
           l_anterior('x') := l_ponto('x');
@@ -2705,6 +3356,7 @@ AS
   --
   -- Change History:
   --   15/01/22 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Ajuste para as dimensões úteis da projeção
   --   
   -- =================================================================================================
   FUNCTION exibir_abertura_svg (
@@ -2715,12 +3367,16 @@ AS
   )
   RETURN VARCHAR2
   IS
-    l_svg VARCHAR2(1000);
+    l_svg      VARCHAR2(1000);
+    l_largura  NUMBER      := p_largura;
+    l_altura   NUMBER      := p_altura;
+    l_projecao VARCHAR2(1) := normalizar_projecao (p_projecao);
     
   BEGIN
-    l_svg := '<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="' || p_largura || '" height="' || p_altura || '">' || chr(13) || chr(10);
+    ajustar_dimensoes_uteis (l_largura, l_altura, l_projecao);
+    l_svg := '<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="' || l_largura || '" height="' || l_altura || '">' || chr(13) || chr(10);
     IF p_moldura THEN
-      l_svg := l_svg || '<rect x="0" y="0" width="' || p_largura || '" height="' || p_altura || '" fill="none" stroke="rgb(150,150,150)" stroke-width="1" />' || chr(13) || chr(10);
+      l_svg := l_svg || '<rect x="0" y="0" width="' || l_largura || '" height="' || l_altura || '" fill="none" stroke="rgb(150,150,150)" stroke-width="1" />' || chr(13) || chr(10);
     END IF;
     
     RETURN l_svg;
@@ -2795,9 +3451,11 @@ AS
   --   @p_altura   = Tamanho vertical da imagem do mapa em pontos
   --   @p_projecao = Caractere que identifica o sistema de projeção do mapa terrestre
   --   @p_moldura  = Verdadeiro ou falso para construir um contorno na imagem
+  --   @p_raio     = Tamanho (raio) em pontos do marcador das cidades (opcional; padrão proporcional à largura)
   --
   -- Change History:
   --   29/10/26 Daniel Madeira: Versão inicial
+  --   02/11/26 Daniel Madeira: Ajuste para as dimensões úteis da projeção e parâmetro opcional p_raio
   --
   -- =================================================================================================
   PROCEDURE exibir_mapa (
@@ -2805,6 +3463,7 @@ AS
   , p_altura   IN NUMBER   DEFAULT 400
   , p_projecao IN VARCHAR2 DEFAULT 'c'
   , p_moldura  IN BOOLEAN  DEFAULT false
+  , p_raio     IN NUMBER   DEFAULT NULL
   )
   IS
     TYPE continentes_t IS TABLE OF VARCHAR2(30);
@@ -2834,6 +3493,8 @@ AS
     END imprimir_e_liberar;
     
   BEGIN
+    ajustar_dimensoes_uteis (l_largura, l_altura, l_projecao);
+
     htp.prn (exibir_abertura_svg (l_largura, l_altura, l_projecao, nvl(p_moldura, false)));
     
     l_clob := exibir_fundo_azul (l_largura, l_altura, l_projecao);
@@ -2844,7 +3505,7 @@ AS
       imprimir_e_liberar (l_clob);
     END LOOP;
     
-    l_clob := exibir_cidades (l_largura, l_altura, l_projecao);
+    l_clob := exibir_cidades (l_largura, l_altura, l_projecao, p_raio);
     imprimir_e_liberar (l_clob);
     
     l_clob := exibir_grade (l_largura, l_altura, l_projecao);
